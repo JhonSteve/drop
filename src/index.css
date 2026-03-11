@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+/* PWA 支持 */
+@supports (padding: max(0px)) {
+  .pb-safe {
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+  }
+}
+
+/* 键盘适配 */
+@supports (height: env(keyboard-inset-height)) {
+  .keyboard-open {
+    padding-bottom: env(keyboard-inset-height);
+  }
+}
+
+/* 移动端输入框聚焦时隐藏其他元素 */
+@media (max-width: 1023px) {
+  input:focus,
+  textarea:focus {
+    /* 确保输入框不被键盘遮挡 */
+    scroll-margin-bottom: 100px;
+  }
+}
+
+/* 防止 iOS 弹性滚动 */
+html {
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* PWA 全屏模式优化 */
+@supports (display: env(safe-area-inset-top)) {
+  .safe-area-top {
+    padding-top: env(safe-area-inset-top);
+  }
+  
+  .safe-area-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* 虚拟键盘弹出时的底部安全区域 */
+.keyboard-visible {
+  padding-bottom: env(keyboard-inset-height, 300px);
+}

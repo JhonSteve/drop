@@ -1,0 +1,5 @@
+{
+  "name": "OpenClaw Drop",
+  "description": "End-to-end encrypted text and file transfer across devices via WebSockets.",
+  "requestFramePermissions": []
+}
