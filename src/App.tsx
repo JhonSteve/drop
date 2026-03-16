@@ -8,12 +8,14 @@ import {
   generateRoomKey,
   deriveKey,
   deriveRoomId,
-  arrayBufferToBase64,
   base64ToArrayBuffer,
   type MessageType,
   type EncryptedEnvelope,
 } from "./lib/crypto";
+import type { WorkerResponse } from "./lib/file-worker";
 import { cn } from "./lib/utils";
+
+const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB (matches server maxHttpBufferSize)
 
 interface Message {
   id: string;
@@ -51,14 +53,34 @@ export default function App() {
   const [viewportHeight, setViewportHeight] = useState(window.innerHeight);
   const [autoCopyToClipboard, setAutoCopyToClipboard] = useState(false);
   const autoCopyRef = useRef(true);
+  const [errorToast, setErrorToast] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!errorToast) return;
+    const timer = setTimeout(() => setErrorToast(null), 4000);
+    return () => clearTimeout(timer);
+  }, [errorToast]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const workerRef = useRef<Worker | null>(null);
 
   useEffect(() => {
     autoCopyRef.current = autoCopyToClipboard;
   }, [autoCopyToClipboard]);
+
+  // Initialize Web Worker for offloading file encryption
+  useEffect(() => {
+    workerRef.current = new Worker(
+      new URL("./lib/file-worker.ts", import.meta.url),
+      { type: "module" }
+    );
+    return () => {
+      workerRef.current?.terminate();
+      workerRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     const initRoom = async () => {
@@ -93,13 +115,12 @@ export default function App() {
             content?: string;
             fileName?: string;
             fileType?: string;
-            fileData?: string;
             fileSize?: number;
           }>;
-          // 恢复消息，将 base64 转回 ArrayBuffer
+          // File data is not persisted (too large, ephemeral across sessions)
           const restored: Message[] = parsed.map(msg => ({
             ...msg,
-            fileData: msg.fileData ? base64ToArrayBuffer(msg.fileData) : undefined,
+            fileData: undefined,
           }));
           setMessages(restored);
         } catch (e) {
@@ -151,10 +172,11 @@ export default function App() {
   useEffect(() => {
     if (!roomId) return;
     const storageKey = `openclaw-messages-${roomId}`;
-    // 过滤掉 ArrayBuffer，转为 base64 以便序列化
-    const toSave = messages.map(({ fileData, ...rest }) => ({
+    // Don't save fileData to localStorage — it's too large and ephemeral
+    // (crypto key changes each session, so persisted file data is unrecoverable)
+    const toSave = messages.map(({ fileData: _fileData, ...rest }) => ({
       ...rest,
-      fileData: fileData ? arrayBufferToBase64(fileData) : undefined,
+      fileData: undefined,
     }));
     localStorage.setItem(storageKey, JSON.stringify(toSave));
   }, [messages, roomId]);
@@ -208,27 +230,79 @@ export default function App() {
     }
   }, [textInput, socket, cryptoKey, roomId]);
 
-  const sendFile = useCallback(async (file: File) => {
-    if (!socket || !cryptoKey || !roomId) return;
-    setIsSending(true);
-    try {
-      const arrayBuffer = await file.arrayBuffer();
-      const fileDataBase64 = arrayBufferToBase64(arrayBuffer);
-      const envelope = await encryptPayload(cryptoKey, { type: "file", fileName: file.name, fileType: file.type, fileData: fileDataBase64 });
-      socket.emit("send-message", { roomId, payload: envelope });
-      setMessages((prev) => [...prev, { id: `me-${Date.now()}`, type: "file", senderId: socket.id || "me", timestamp: Date.now(), fileName: file.name, fileType: file.type, fileData: arrayBuffer, fileSize: arrayBuffer.byteLength }]);
-    } catch (err) {
-      console.error("Failed to send file", err);
-    } finally {
-      setIsSending(false);
-    }
-  }, [socket, cryptoKey, roomId]);
+  const sendFile = useCallback(
+    (file: File) => {
+      if (!socket || !cryptoKey || !roomId || !workerRef.current) return;
+      setIsSending(true);
 
-  const handleFileInput = useCallback(async (e: { target: { files: FileList | null } }) => {
-    const file = e.target.files?.[0];
-    if (file) await sendFile(file);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  }, [sendFile]);
+      const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+      const handler = (e: MessageEvent<WorkerResponse>) => {
+        const data = e.data;
+        if (data.id !== requestId) return;
+        workerRef.current?.removeEventListener("message", handler);
+
+        if (data.type === "encrypt-file-error") {
+          console.error("Failed to send file:", data.error);
+          setIsSending(false);
+          return;
+        }
+
+        // Send encrypted envelope via socket
+        socket.emit("send-message", { roomId, payload: data.envelope });
+
+        // Add to local messages with the ArrayBuffer for display/download
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `me-${Date.now()}`,
+            type: "file" as MessageType,
+            senderId: socket.id || "me",
+            timestamp: Date.now(),
+            fileName: data.fileName,
+            fileType: data.fileType,
+            fileData: data.fileData,
+            fileSize: data.fileData.byteLength,
+          },
+        ]);
+
+        setIsSending(false);
+      };
+
+      workerRef.current.addEventListener("message", handler);
+
+      // Read file as ArrayBuffer and transfer it to the worker
+      file.arrayBuffer().then((arrayBuffer) => {
+        workerRef.current?.postMessage(
+          {
+            type: "encrypt-file",
+            id: requestId,
+            key: cryptoKey,
+            fileName: file.name,
+            fileType: file.type,
+            fileData: arrayBuffer,
+          },
+          [arrayBuffer] // Transfer ownership to worker (zero-copy)
+        );
+      });
+    },
+    [socket, cryptoKey, roomId]
+  );
+
+  const handleFileInput = useCallback(
+    (e: { target: { files: FileList | null } }) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      if (file.size > MAX_FILE_SIZE) {
+        setErrorToast(`文件 "${file.name}" (${formatFileSize(file.size)}) 超过 ${formatFileSize(MAX_FILE_SIZE)} 上限`);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        return;
+      }
+      sendFile(file);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    },
+    [sendFile]
+  );
 
   const copyToClipboard = useCallback(async (text: string, messageId: string) => {
     try {
@@ -304,6 +378,12 @@ export default function App() {
 
   return (
     <div className="h-[100dvh] bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 font-sans flex flex-col overflow-hidden">
+      {errorToast && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] bg-red-500 text-white px-4 py-3 rounded-xl shadow-lg text-sm max-w-[90vw]">
+          {errorToast}
+        </div>
+      )}
+
       {isSending && (
         <div className="fixed inset-0 z-50 bg-white/95 dark:bg-zinc-950/95 flex items-center justify-center">
           <div className="text-center">
