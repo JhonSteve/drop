@@ -4,10 +4,23 @@ import { createServer as createHttpsServer } from "https";
 import { Server } from "socket.io";
 import { createServer as createViteServer } from "vite";
 import path from "path";
+import os from "os";
 import { fileURLToPath } from "url";
 import { createCA, createCert } from "mkcert";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function getLocalIP(): string {
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name] || []) {
+      if (iface.family === "IPv4" && !iface.internal) return iface.address;
+    }
+  }
+  return "127.0.0.1";
+}
+
+const localIP = getLocalIP();
 
 async function startServer() {
   const app = express();
@@ -27,7 +40,7 @@ async function startServer() {
     });
 
     const cert = await createCert({
-      domains: ["127.0.0.1", "localhost", "0.0.0.0", "172.16.18.66"],
+      domains: ["127.0.0.1", "localhost", "0.0.0.0", localIP],
       validity: 365,
       ca: ca
     });
@@ -46,16 +59,48 @@ async function startServer() {
 
   const io = new Server(server, {
     cors: {
-      origin: "*",
+      origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+        // Allow requests from localhost, same-origin, and LAN IPs
+        if (!origin ||
+            origin.includes("localhost") ||
+            origin.includes("127.0.0.1") ||
+            origin.startsWith("http://192.168.") ||
+            origin.startsWith("https://192.168.") ||
+            origin.startsWith("http://10.") ||
+            origin.startsWith("https://10.") ||
+            origin.startsWith("http://172.16.") ||
+            origin.startsWith("https://172.16.")) {
+          callback(null, true);
+        } else {
+          callback(new Error("Not allowed by CORS"));
+        }
+      },
       methods: ["GET", "POST"],
     },
     maxHttpBufferSize: 500 * 1024 * 1024, // 500 MB max payload
+    pingTimeout: 60000,     // Close connection after 60s without pong
+    pingInterval: 25000,    // Ping every 25s
   });
 
   const PORT = parseInt(process.env.PORT || "3001", 10);
 
   // Track which rooms each socket is in for accurate peer count
   const socketRooms = new Map<string, Set<string>>();
+
+  // Simple rate limiter: max messages per socket per second
+  const messageRates = new Map<string, { count: number; resetAt: number }>();
+  const MAX_MESSAGES_PER_SECOND = 20;
+
+  function isRateLimited(socketId: string): boolean {
+    const now = Date.now();
+    const rate = messageRates.get(socketId);
+    if (!rate || now > rate.resetAt) {
+      messageRates.set(socketId, { count: 1, resetAt: now + 1000 });
+      return false;
+    }
+    rate.count++;
+    return rate.count > MAX_MESSAGES_PER_SECOND;
+  }
 
   function getRoomMemberCount(roomId: string): number {
     const room = io.sockets.adapter.rooms.get(roomId);
@@ -86,6 +131,16 @@ async function startServer() {
     });
 
     socket.on("send-message", (data: { roomId: string; payload: unknown }) => {
+      // Rate limit check
+      if (isRateLimited(socket.id)) {
+        console.warn(`Rate limited: ${socket.id}`);
+        return;
+      }
+      // Verify sender has joined this room
+      if (!socketRooms.get(socket.id)?.has(data.roomId)) {
+        console.warn(`Socket ${socket.id} attempted to send to room ${data.roomId} without joining`);
+        return;
+      }
       // payload is fully encrypted -- server is just a relay
       socket.to(data.roomId).emit("receive-message", {
         senderId: socket.id,
@@ -106,6 +161,7 @@ async function startServer() {
         }
       }
       socketRooms.delete(socket.id);
+      messageRates.delete(socket.id);
     });
   });
 
@@ -129,7 +185,7 @@ async function startServer() {
   server.listen(PORT, "0.0.0.0", () => {
     const protocol = isHttps ? "https" : "http";
     console.log(`OpenClaw Drop server running on ${protocol}://localhost:${PORT}`);
-    console.log(`OpenClaw Drop server running on ${protocol}://172.16.18.66:${PORT}`);
+    console.log(`OpenClaw Drop server running on ${protocol}://${localIP}:${PORT}`);
   });
 }
 

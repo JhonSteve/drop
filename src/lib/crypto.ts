@@ -1,5 +1,7 @@
 /**
- * Derives an AES-GCM key from a password/passphrase string.
+ * Derives an AES-GCM key from a room key string.
+ * Uses SHA-256 hash of the room key as salt (deterministic but unique per room).
+ * PBKDF2 iterations set to 600,000 per NIST 2024 recommendations.
  */
 export async function deriveKey(password: string): Promise<CryptoKey> {
   const enc = new TextEncoder();
@@ -11,13 +13,17 @@ export async function deriveKey(password: string): Promise<CryptoKey> {
     ["deriveBits", "deriveKey"]
   );
 
-  const salt = enc.encode("openclaw-e2ee-salt-v1");
+  // Derive salt from the room key itself via SHA-256.
+  // This is deterministic (same key → same salt) but unique per room,
+  // preventing precomputation attacks against the fixed salt.
+  const saltHash = await window.crypto.subtle.digest("SHA-256", enc.encode(password + ":openclaw-salt-v2"));
+  const salt = new Uint8Array(saltHash.slice(0, 16));
 
   return window.crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
       salt: salt,
-      iterations: 100000,
+      iterations: 600000, // NIST SP 800-63B 2024 recommendation
       hash: "SHA-256",
     },
     keyMaterial,

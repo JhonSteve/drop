@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
 /* PWA 支持 */
 @supports (padding: max(0px)) {

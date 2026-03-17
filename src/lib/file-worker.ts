@@ -83,6 +83,10 @@ onmessage = async (e: MessageEvent<WorkerRequest>) => {
       fileData: fileDataBase64,
     });
 
+    // Note: fileName sanitization is handled by the main thread (App.tsx) via
+    // sanitizeFileName() before display. The worker encrypts the original fileName
+    // into the envelope so the receiver can apply their own sanitization on receipt.
+
     const response: WorkerResponse = {
       type: "encrypt-file-done",
       id,

@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { io, Socket } from "socket.io-client";
 import { QRCodeSVG } from "qrcode.react";
 import { Copy, FileUp, Send, Check, ShieldCheck, Download, Trash2, Wifi, WifiOff, ClipboardPaste, X, QrCode, ChevronRight } from "lucide-react";
@@ -14,6 +14,8 @@ import {
 } from "./lib/crypto";
 import type { WorkerResponse } from "./lib/file-worker";
 import { cn } from "./lib/utils";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB (matches server maxHttpBufferSize)
 
@@ -29,11 +31,83 @@ interface Message {
   fileData?: ArrayBuffer;
 }
 
+/**
+ * Sanitizes a file name to prevent path traversal attacks.
+ * Inspired by LocalSend CVE-2025-27142 and Magic Wormhole CVE-2026-32116.
+ */
+function sanitizeFileName(fileName: string): string {
+  return fileName
+    .replace(/\.\./g, '')        // Remove parent directory references
+    .replace(/[\/\\]/g, '_')     // Replace path separators
+    .replace(/^\.+/, '')         // Remove leading dots
+    .replace(/[\x00-\x1f]/g, '') // Remove control characters
+    .substring(0, 255)           // Limit length
+    || 'unnamed';                // Fallback if empty
+}
+
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function looksLikeMarkdown(text: string): boolean {
+  if (!text) return false;
+  const markdownPatterns = [
+    /^#{1,6}\s/m,          // headings
+    /\*\*[^*]+\*\*/,       // bold
+    /\*[^*]+\*/,           // italic
+    /`[^`]+`/,             // inline code
+    /```[\s\S]*```/,       // code blocks
+    /^\s*[-*+]\s/m,        // unordered lists
+    /^\s*\d+\.\s/m,        // ordered lists
+    /^\s*>\s/m,            // blockquotes
+    /\[.+\]\(.+\)/,        // links
+    /\|.+\|.+\|/,          // tables
+    /^---+$/m,             // horizontal rules
+  ];
+  return markdownPatterns.some(pattern => pattern.test(text));
+}
+
+const MessageBubble = React.memo(function MessageBubble({ msg, isMe, copiedId, onCopy, onDownload }: {
+  msg: Message;
+  isMe: boolean;
+  copiedId: string | null;
+  onCopy: (text: string, messageId: string) => void;
+  onDownload: (fileData: ArrayBuffer, fileName: string, fileType: string) => void;
+}) {
+  return (
+    <div className={cn("flex flex-col max-w-[88%]", isMe ? "ml-auto items-end" : "mr-auto items-start")}>
+      <div className="text-[10px] text-zinc-400 mb-1 px-1">{new Date(msg.timestamp).toLocaleTimeString()}</div>
+      {msg.type === "text" ? (
+        <div className={cn("px-3 py-2 rounded-2xl text-sm whitespace-pre-wrap break-words max-w-full", isMe ? "bg-emerald-600 text-white rounded-tr-md" : "bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100 rounded-tl-md")}>
+          {looksLikeMarkdown(msg.content || "") ? (
+            <div className="prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-1 prose-ul:my-1 prose-ol:my-1 prose-pre:my-1 prose-code:text-xs prose-pre:bg-black/20 dark:prose-pre:bg-black/40">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ""}</ReactMarkdown>
+            </div>
+          ) : (
+            <span>{msg.content}</span>
+          )}
+          <button onClick={() => onCopy(msg.content || "", msg.id)} className="ml-1.5 inline-flex opacity-60 hover:opacity-100">{copiedId === msg.id ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}</button>
+        </div>
+      ) : (
+        <div className={cn("p-2 rounded-2xl flex items-center gap-2 max-w-full", isMe ? "bg-emerald-100 dark:bg-emerald-600/30 border border-emerald-300 dark:border-emerald-500/40 rounded-tr-md" : "bg-zinc-200 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded-tl-md")}>
+          <div className={cn("p-1.5 rounded-lg shrink-0", isMe ? "bg-emerald-200 dark:bg-emerald-500/30 text-emerald-700 dark:text-emerald-400" : "bg-zinc-300 dark:bg-zinc-600 text-zinc-600 dark:text-zinc-300")}><FileUp className="w-4 h-4" /></div>
+          <div className="flex flex-col min-w-0 flex-1"><span className="text-xs font-medium truncate">{msg.fileName}</span><span className="text-[10px] text-zinc-500">{msg.fileSize ? formatFileSize(msg.fileSize) : "未知"}</span></div>
+          <button onClick={() => msg.fileData && onDownload(msg.fileData, msg.fileName!, msg.fileType || "")} className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 rounded-lg shrink-0"><Download className="w-4 h-4" /></button>
+        </div>
+      )}
+    </div>
+  );
+});
+
+function AutoCopyToggle({ enabled, onToggle }: { enabled: boolean; onToggle: () => void }) {
+  return (
+    <button onClick={onToggle} className={cn("relative w-11 h-6 rounded-full transition-colors", enabled ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-600")}>
+      <div className={cn("absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform", enabled ? "translate-x-5" : "translate-x-0.5")} />
+    </button>
+  );
 }
 
 export default function App() {
@@ -131,7 +205,7 @@ export default function App() {
   }, [roomId]);
 
   useEffect(() => {
-    if (!roomId || !cryptoKey) return;
+    if (!roomId || !cryptoKey) return undefined;
     const newSocket = io(window.location.origin);
     setSocket(newSocket);
     newSocket.on("connect", () => {
@@ -147,16 +221,29 @@ export default function App() {
       try {
         const { senderId, payload, timestamp } = data;
         const decrypted = await decryptPayload(cryptoKey, payload);
+        // Validate message type before processing
+        if (decrypted.type !== "text" && decrypted.type !== "file") {
+          console.error("Invalid message type:", decrypted.type);
+          return;
+        }
         const newMessage: Message = { id: `${senderId}-${timestamp}`, type: decrypted.type, senderId, timestamp };
         if (decrypted.type === "text") {
+          if (typeof decrypted.text !== "string") {
+            console.error("Invalid text message: text is not a string");
+            return;
+          }
           newMessage.content = decrypted.text;
           if (autoCopyRef.current && decrypted.text) {
             navigator.clipboard.writeText(decrypted.text).catch(() => {});
           }
         } else if (decrypted.type === "file") {
-          const fileBuffer = base64ToArrayBuffer(decrypted.fileData!);
-          newMessage.fileName = decrypted.fileName;
-          newMessage.fileType = decrypted.fileType;
+          if (!decrypted.fileData || typeof decrypted.fileData !== "string") {
+            console.error("Invalid file message: missing fileData");
+            return;
+          }
+          const fileBuffer = base64ToArrayBuffer(decrypted.fileData);
+          newMessage.fileName = sanitizeFileName(decrypted.fileName || "unknown");
+          newMessage.fileType = decrypted.fileType || "application/octet-stream";
           newMessage.fileData = fileBuffer;
           newMessage.fileSize = fileBuffer.byteLength;
         }
@@ -165,7 +252,7 @@ export default function App() {
         console.error("Failed to decrypt message", err);
       }
     });
-    return () => newSocket.disconnect();
+    return () => { newSocket.disconnect(); };
   }, [roomId, cryptoKey]);
 
   // 保存消息到 localStorage
@@ -178,7 +265,19 @@ export default function App() {
       ...rest,
       fileData: undefined,
     }));
-    localStorage.setItem(storageKey, JSON.stringify(toSave));
+    try {
+      // Keep only the latest 100 messages to avoid localStorage quota issues
+      localStorage.setItem(storageKey, JSON.stringify(toSave.slice(-100)));
+    } catch (e) {
+      console.warn("Failed to save messages to localStorage:", e);
+      // If saving fails, try clearing and saving with fewer messages
+      try {
+        localStorage.removeItem(storageKey);
+        localStorage.setItem(storageKey, JSON.stringify(toSave.slice(-10)));
+      } catch (e2) {
+        console.error("localStorage is unavailable:", e2);
+      }
+    }
   }, [messages, roomId]);
 
   useEffect(() => {
@@ -223,7 +322,7 @@ export default function App() {
     try {
       const envelope = await encryptPayload(cryptoKey, { type: "text", text: contentToSend });
       socket.emit("send-message", { roomId, payload: envelope });
-      setMessages((prev) => [...prev, { id: `me-${Date.now()}`, type: "text", senderId: socket.id || "me", timestamp: Date.now(), content: contentToSend }]);
+      setMessages((prev) => [...prev, { id: `me-${crypto.randomUUID()}`, type: "text", senderId: socket.id || "me", timestamp: Date.now(), content: contentToSend }]);
       setTextInput("");
     } catch (err) {
       console.error("Failed to send text", err);
@@ -244,6 +343,7 @@ export default function App() {
 
         if (data.type === "encrypt-file-error") {
           console.error("Failed to send file:", data.error);
+          setErrorToast(`发送失败: ${data.error}`);
           setIsSending(false);
           return;
         }
@@ -255,7 +355,7 @@ export default function App() {
         setMessages((prev) => [
           ...prev,
           {
-            id: `me-${Date.now()}`,
+            id: `me-${crypto.randomUUID()}`,
             type: "file" as MessageType,
             senderId: socket.id || "me",
             timestamp: Date.now(),
@@ -343,28 +443,7 @@ export default function App() {
     }
   }, [roomId]);
   const shareUrl = window.location.href;
-  const recentMessages = messages.slice(-3);
-
-  const renderMessage = (msg: Message) => {
-    const isMe = msg.senderId === socket?.id || msg.senderId === "me";
-    return (
-      <div key={msg.id} className={cn("flex flex-col max-w-[88%]", isMe ? "ml-auto items-end" : "mr-auto items-start")}>
-        <div className="text-[10px] text-zinc-400 mb-1 px-1">{new Date(msg.timestamp).toLocaleTimeString()}</div>
-        {msg.type === "text" ? (
-          <div className={cn("px-3 py-2 rounded-2xl text-sm whitespace-pre-wrap break-words max-w-full", isMe ? "bg-emerald-600 text-white rounded-tr-md" : "bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100 rounded-tl-md")}>
-            {msg.content}
-            <button onClick={() => copyToClipboard(msg.content || "", msg.id)} className="ml-1.5 inline-flex opacity-60 hover:opacity-100">{copiedId === msg.id ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}</button>
-          </div>
-        ) : (
-          <div className={cn("p-2 rounded-2xl flex items-center gap-2 max-w-full", isMe ? "bg-emerald-100 dark:bg-emerald-600/30 border border-emerald-300 dark:border-emerald-500/40 rounded-tr-md" : "bg-zinc-200 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded-tl-md")}>
-            <div className={cn("p-1.5 rounded-lg shrink-0", isMe ? "bg-emerald-200 dark:bg-emerald-500/30 text-emerald-700 dark:text-emerald-400" : "bg-zinc-300 dark:bg-zinc-600 text-zinc-600 dark:text-zinc-300")}><FileUp className="w-4 h-4" /></div>
-            <div className="flex flex-col min-w-0 flex-1"><span className="text-xs font-medium truncate">{msg.fileName}</span><span className="text-[10px] text-zinc-500">{msg.fileSize ? formatFileSize(msg.fileSize) : "未知"}</span></div>
-            <button onClick={() => msg.fileData && downloadFile(msg.fileData, msg.fileName!, msg.fileType || "")} className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 rounded-lg shrink-0"><Download className="w-4 h-4" /></button>
-          </div>
-        )}
-      </div>
-    );
-  };
+  const recentMessages = useMemo(() => messages.slice(-3), [messages]);
 
   if (!window.crypto || !window.crypto.subtle) {
     return (
@@ -422,7 +501,10 @@ export default function App() {
             </div>
           </div>
           <div className="flex-1 overflow-y-auto p-3 space-y-2">
-            {messages.length === 0 ? <div className="h-full flex flex-col items-center justify-center text-zinc-400"><ShieldCheck className="w-10 h-10 opacity-30 mb-2" /><p className="text-sm">暂无消息</p></div> : messages.map(renderMessage)}
+            {messages.length === 0 ? <div className="h-full flex flex-col items-center justify-center text-zinc-400"><ShieldCheck className="w-10 h-10 opacity-30 mb-2" /><p className="text-sm">暂无消息</p></div> : messages.map((msg) => {
+              const isMe = msg.senderId === socket?.id || msg.senderId === "me";
+              return <MessageBubble key={msg.id} msg={msg} isMe={isMe} copiedId={copiedId} onCopy={copyToClipboard} onDownload={downloadFile} />;
+            })}
             <div ref={messagesEndRef} />
           </div>
         </div>
@@ -448,9 +530,7 @@ export default function App() {
           <div className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4">
             <div className="flex items-center justify-between">
               <span className="text-sm text-zinc-700 dark:text-zinc-300">自动添加到剪贴板</span>
-              <button onClick={() => setAutoCopyToClipboard(!autoCopyToClipboard)} className={cn("relative w-11 h-6 rounded-full transition-colors", autoCopyToClipboard ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-600")}>
-                <div className={cn("absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform", autoCopyToClipboard ? "translate-x-5" : "translate-x-0.5")} />
-              </button>
+              <AutoCopyToggle enabled={autoCopyToClipboard} onToggle={() => setAutoCopyToClipboard(!autoCopyToClipboard)} />
             </div>
           </div>
         </div>
@@ -460,7 +540,10 @@ export default function App() {
             {messages.length > 0 && <button onClick={clearMessages} className="text-xs flex items-center gap-1 text-zinc-500 hover:text-red-500 px-2 py-1 rounded-md hover:bg-zinc-200 dark:hover:bg-zinc-800"><Trash2 className="w-3 h-3" />清空</button>}
           </div>
           <div className="flex-1 overflow-y-auto p-3 space-y-2">
-            {messages.length === 0 ? <div className="h-full flex flex-col items-center justify-center text-zinc-400"><ShieldCheck className="w-10 h-10 opacity-30 mb-2" /><p className="text-sm">等待接收消息...</p></div> : messages.map(renderMessage)}
+            {messages.length === 0 ? <div className="h-full flex flex-col items-center justify-center text-zinc-400"><ShieldCheck className="w-10 h-10 opacity-30 mb-2" /><p className="text-sm">等待接收消息...</p></div> : messages.map((msg) => {
+              const isMe = msg.senderId === socket?.id || msg.senderId === "me";
+              return <MessageBubble key={msg.id} msg={msg} isMe={isMe} copiedId={copiedId} onCopy={copyToClipboard} onDownload={downloadFile} />;
+            })}
             <div ref={messagesEndRef} />
           </div>
           <div className="p-3 border-t border-zinc-200 dark:border-zinc-800 shrink-0">
@@ -490,15 +573,16 @@ export default function App() {
                 <span className="text-xs text-zinc-500">最近消息</span>
                 <button onClick={() => setShowAllMessages(true)} className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-0.5 py-0.5">全部 ({messages.length})<ChevronRight className="w-3 h-3" /></button>
               </div>
-              <div className="bg-zinc-100 dark:bg-zinc-900 rounded-xl p-2 space-y-2">{recentMessages.map(renderMessage)}</div>
+              <div className="bg-zinc-100 dark:bg-zinc-900 rounded-xl p-2 space-y-2">{recentMessages.map((msg) => {
+                const isMe = msg.senderId === socket?.id || msg.senderId === "me";
+                return <MessageBubble key={msg.id} msg={msg} isMe={isMe} copiedId={copiedId} onCopy={copyToClipboard} onDownload={downloadFile} />;
+              })}</div>
             </div>
           )}
           <div className="flex-1 flex flex-col justify-center gap-2.5 py-3">
             <div className="flex items-center justify-between px-4 py-3 bg-zinc-100 dark:bg-zinc-800 rounded-xl">
               <span className="text-sm text-zinc-700 dark:text-zinc-300">自动添加到剪贴板</span>
-              <button onClick={() => setAutoCopyToClipboard(!autoCopyToClipboard)} className={cn("relative w-11 h-6 rounded-full transition-colors", autoCopyToClipboard ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-600")}>
-                <div className={cn("absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform", autoCopyToClipboard ? "translate-x-5" : "translate-x-0.5")} />
-              </button>
+              <AutoCopyToggle enabled={autoCopyToClipboard} onToggle={() => setAutoCopyToClipboard(!autoCopyToClipboard)} />
             </div>
             <button onClick={pasteAndSend} className="w-full py-4 bg-emerald-600 active:bg-emerald-700 text-white rounded-xl font-semibold flex items-center justify-center gap-2 shadow-sm"><ClipboardPaste className="w-5 h-5" />粘贴并发送</button>
             <button onClick={() => fileInputRef.current?.click()} className="w-full py-3 bg-zinc-100 dark:bg-zinc-800 active:bg-zinc-200 dark:active:bg-zinc-700 rounded-xl font-medium flex items-center justify-center gap-2"><FileUp className="w-5 h-5" />选择文件</button>
