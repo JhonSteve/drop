@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { io, Socket } from "socket.io-client";
 import { QRCodeSVG } from "qrcode.react";
-import { Copy, FileUp, Send, Check, ShieldCheck, Download, Trash2, Wifi, WifiOff, ClipboardPaste, X, QrCode, ChevronRight, FolderUp, Users } from "lucide-react";
+import { Copy, FileUp, Send, Check, ShieldCheck, Download, Trash2, Wifi, WifiOff, ClipboardPaste, X, QrCode, ChevronRight, ChevronDown, ChevronUp, FolderUp, Users } from "lucide-react";
 import JSZip from "jszip";
 import {
   encryptPayload,
@@ -81,19 +81,91 @@ const MessageBubble = React.memo(function MessageBubble({ msg, isMe, copiedId, o
   onCopy: (text: string, messageId: string) => void;
   onDownload: (fileData: ArrayBuffer, fileName: string, fileType: string) => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const content = msg.content || "";
+  const isLongText = content.length >= 200;
+  const isMarkdown = looksLikeMarkdown(content);
+
   return (
     <div className={cn("flex flex-col max-w-[88%]", isMe ? "ml-auto items-end" : "mr-auto items-start")}>
       <div className="text-[10px] text-zinc-400 mb-1 px-1">{new Date(msg.timestamp).toLocaleTimeString()}</div>
       {msg.type === "text" ? (
-        <div className={cn("px-3 py-2 rounded-2xl text-sm whitespace-pre-wrap break-words max-w-full", isMe ? "bg-emerald-600 text-white rounded-tr-md" : "bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100 rounded-tl-md")}>
-          {looksLikeMarkdown(msg.content || "") ? (
-            <div className="prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-1 prose-ul:my-1 prose-ol:my-1 prose-pre:my-1 prose-code:text-xs prose-pre:bg-black/20 dark:prose-pre:bg-black/40">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ""}</ReactMarkdown>
-            </div>
-          ) : (
-            <span>{msg.content}</span>
-          )}
-          <button onClick={() => onCopy(msg.content || "", msg.id)} className="ml-1.5 inline-flex opacity-60 hover:opacity-100">{copiedId === msg.id ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}</button>
+        <div className={cn(
+          "px-3 py-2 rounded-2xl text-sm max-w-full",
+          isMe
+            ? "bg-emerald-600 text-white rounded-tr-md"
+            : "bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100 rounded-tl-md"
+        )}>
+          {/* Text content with collapse/expand */}
+          <div className={cn(
+            "whitespace-pre-wrap break-words",
+            isLongText && !expanded && "line-clamp-5"
+          )}>
+            {isMarkdown ? (
+              <div className={cn(
+                "prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-1 prose-ul:my-1 prose-ol:my-1 prose-pre:my-1 prose-code:text-xs prose-pre:bg-black/20 dark:prose-pre:bg-black/40",
+                isLongText && !expanded && "max-h-[120px] overflow-hidden relative",
+                expanded && "max-h-none"
+              )}>
+                {!expanded && isLongText && (
+                  <div className={cn(
+                    "absolute bottom-0 left-0 right-0 h-8 pointer-events-none z-10",
+                    isMe
+                      ? "bg-gradient-to-t from-emerald-600 to-transparent"
+                      : "bg-gradient-to-t from-zinc-200 dark:from-zinc-700 to-transparent"
+                  )} />
+                )}
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    pre: ({ children }) => (
+                      <pre className="max-h-[200px] overflow-auto rounded-lg bg-black/20 dark:bg-black/40 p-2">
+                        {children}
+                      </pre>
+                    ),
+                  }}
+                >
+                  {content}
+                </ReactMarkdown>
+              </div>
+            ) : (
+              <span className={cn(
+                isLongText && !expanded && "line-clamp-5 overflow-hidden block"
+              )}>
+                {content}
+              </span>
+            )}
+          </div>
+
+          {/* Action buttons row */}
+          <div className="flex items-center gap-2 mt-1.5 -mb-0.5">
+            {/* Expand/collapse button for long text */}
+            {isLongText && (
+              <button
+                onClick={() => setExpanded(!expanded)}
+                className="text-[11px] opacity-70 hover:opacity-100 flex items-center gap-0.5 underline-offset-2 hover:underline transition-opacity"
+              >
+                {expanded ? (
+                  <>收起<ChevronUp className="w-3 h-3" /></>
+                ) : (
+                  <>展开全文<ChevronDown className="w-3 h-3" /></>
+                )}
+              </button>
+            )}
+
+            {/* Copy button */}
+            <button
+              onClick={() => onCopy(content, msg.id)}
+              className="inline-flex opacity-50 hover:opacity-100 p-0.5 transition-opacity"
+            >
+              {copiedId === msg.id ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+            </button>
+
+            {/* Character count for long text */}
+            {isLongText && (
+              <span className="text-[10px] opacity-40">{content.length} 字</span>
+            )}
+          </div>
         </div>
       ) : (
         <div className={cn("p-2 rounded-2xl flex items-center gap-2 max-w-full", isMe ? "bg-emerald-100 dark:bg-emerald-600/30 border border-emerald-300 dark:border-emerald-500/40 rounded-tr-md" : "bg-zinc-200 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded-tl-md")}>
