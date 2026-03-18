@@ -44,15 +44,36 @@ export interface EncryptedEnvelope {
 
 export type MessageType = "text" | "file";
 
+/**
+ * Chunk metadata for large file transfers.
+ * Large files are split into 5MB chunks, each encrypted and sent separately.
+ */
+export interface FileChunk {
+  fileId: string;        // Unique ID for the file transfer
+  chunkIndex: number;    // Chunk number (0-based)
+  totalChunks: number;   // Total chunks in file
+  fileName: string;      // Original file name
+  fileType: string;      // Original file type
+  fileSize: number;      // Total file size
+  chunkData: string;     // Base64-encoded chunk data
+}
+
 export interface PlaintextPayload {
   type: MessageType;
+  nonce?: string;  // Unique nonce for replay protection
+  timestamp?: number;  // Timestamp for replay protection
   // For text messages
   text?: string;
   // For file messages
   fileName?: string;
   fileType?: string;
   fileData?: string; // base64-encoded file data
+  // For chunked transfers
+  chunk?: FileChunk;
 }
+
+/** 5MB chunk size for large file transfers */
+export const CHUNK_SIZE = 5 * 1024 * 1024;
 
 /**
  * Encrypts a full payload (including metadata) into an opaque envelope.
@@ -62,7 +83,13 @@ export async function encryptPayload(
   key: CryptoKey,
   payload: PlaintextPayload
 ): Promise<EncryptedEnvelope> {
-  const plaintext = JSON.stringify(payload);
+  // Add unique nonce and timestamp for replay protection
+  const payloadWithNonce = {
+    ...payload,
+    nonce: crypto.randomUUID(),
+    timestamp: Date.now()
+  };
+  const plaintext = JSON.stringify(payloadWithNonce);
   const buffer = new TextEncoder().encode(plaintext);
 
   const iv = window.crypto.getRandomValues(new Uint8Array(12));
@@ -144,4 +171,20 @@ export async function deriveRoomId(roomKey: string): Promise<string> {
   const hashBuffer = await window.crypto.subtle.digest("SHA-256", data);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("").substring(0, 16);
+}
+
+/**
+ * Derives an AES-GCM key from a room key string and optional password.
+ * Password adds an extra layer - both URL hash AND password needed to decrypt.
+ */
+export async function deriveKeyWithPassword(roomKey: string, password: string): Promise<CryptoKey> {
+  return deriveKey(`${roomKey}:pw:${password}`);
+}
+
+/**
+ * Derives a room ID from room key, ignoring password.
+ * This ensures the same room (same URL) always gets the same server-side room ID.
+ */
+export async function deriveRoomIdFromKey(roomKey: string): Promise<string> {
+  return deriveRoomId(roomKey);
 }

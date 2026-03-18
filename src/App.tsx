@@ -1,16 +1,20 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { io, Socket } from "socket.io-client";
 import { QRCodeSVG } from "qrcode.react";
-import { Copy, FileUp, Send, Check, ShieldCheck, Download, Trash2, Wifi, WifiOff, ClipboardPaste, X, QrCode, ChevronRight } from "lucide-react";
+import { Copy, FileUp, Send, Check, ShieldCheck, Download, Trash2, Wifi, WifiOff, ClipboardPaste, X, QrCode, ChevronRight, FolderUp, Users } from "lucide-react";
+import JSZip from "jszip";
 import {
   encryptPayload,
   decryptPayload,
   generateRoomKey,
   deriveKey,
+  deriveKeyWithPassword,
   deriveRoomId,
+  deriveRoomIdFromKey,
   base64ToArrayBuffer,
   type MessageType,
   type EncryptedEnvelope,
+  type FileChunk,
 } from "./lib/crypto";
 import type { WorkerResponse } from "./lib/file-worker";
 import { cn } from "./lib/utils";
@@ -121,13 +125,21 @@ export default function App() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [peersCount, setPeersCount] = useState(0);
   const [isSending, setIsSending] = useState(false);
+  const [isZipping, setIsZipping] = useState(false);
   const [showQRModal, setShowQRModal] = useState(false);
   const [showAllMessages, setShowAllMessages] = useState(false);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [viewportHeight, setViewportHeight] = useState(window.innerHeight);
   const [autoCopyToClipboard, setAutoCopyToClipboard] = useState(false);
   const autoCopyRef = useRef(true);
+  const seenNonces = useRef<Set<string>>(new Set());
+  const incomingChunks = useRef<Map<string, { chunks: Map<number, Uint8Array>; meta: { totalChunks: number; fileName: string; fileType: string; fileSize: number } }>>(new Map());
   const [errorToast, setErrorToast] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number; fileName: string } | null>(null);
+  const [needsPassword, setNeedsPassword] = useState(false);
+  const [passwordInput, setPasswordInput] = useState("");
+  const [hasPassword, setHasPassword] = useState(false);
+  const [activeRooms, setActiveRooms] = useState<Array<{ roomId: string; members: number }>>([]);
 
   useEffect(() => {
     if (!errorToast) return;
@@ -136,6 +148,7 @@ export default function App() {
   }, [errorToast]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const workerRef = useRef<Worker | null>(null);
@@ -158,15 +171,34 @@ export default function App() {
 
   useEffect(() => {
     const initRoom = async () => {
-      let hash = window.location.hash.slice(1);
+      const hash = window.location.hash.slice(1);
+
+      // Parse hash format: "roomKey" or "roomKey:pw"
+      const hashParts = hash.split(":");
+      const roomKey = hashParts[0];
+      const isPasswordProtected = hashParts[1] === "pw";
+
       if (!hash) {
-        hash = generateRoomKey();
-        window.history.replaceState(null, "", `#${hash}`);
+        // Generate new room key (no password)
+        const newKey = generateRoomKey();
+        window.history.replaceState(null, "", `#${newKey}`);
+        const key = await deriveKey(newKey);
+        setCryptoKey(key);
+        const id = await deriveRoomId(newKey);
+        setRoomId(id);
+      } else if (isPasswordProtected) {
+        // Password-protected room - wait for password input
+        setHasPassword(true);
+        setNeedsPassword(true);
+        const id = await deriveRoomIdFromKey(roomKey);
+        setRoomId(id);
+      } else {
+        // Regular room (no password, backwards compatible)
+        const key = await deriveKey(roomKey);
+        setCryptoKey(key);
+        const id = await deriveRoomId(roomKey);
+        setRoomId(id);
       }
-      const key = await deriveKey(hash);
-      setCryptoKey(key);
-      const id = await deriveRoomId(hash);
-      setRoomId(id);
     };
     initRoom();
     const onHashChange = () => window.location.reload();
@@ -206,7 +238,9 @@ export default function App() {
 
   useEffect(() => {
     if (!roomId || !cryptoKey) return undefined;
-    const newSocket = io(window.location.origin);
+    const newSocket = io(window.location.origin, {
+      transports: ["websocket", "polling"],
+    });
     setSocket(newSocket);
     newSocket.on("connect", () => {
       setIsConnected(true);
@@ -217,15 +251,94 @@ export default function App() {
       setPeersCount(0);
     });
     newSocket.on("room-count", (count: number) => setPeersCount(count));
+    newSocket.on("room-list-update", (rooms: Array<{ roomId: string; members: number }>) => {
+      setActiveRooms(rooms);
+    });
     newSocket.on("receive-message", async (data: { senderId: string; payload: EncryptedEnvelope; timestamp: number }) => {
       try {
         const { senderId, payload, timestamp } = data;
         const decrypted = await decryptPayload(cryptoKey, payload);
+        
+        // Replay attack protection: check nonce
+        if (decrypted.nonce) {
+          if (seenNonces.current.has(decrypted.nonce)) {
+            console.warn("Replay attack detected: duplicate nonce");
+            return;
+          }
+          seenNonces.current.add(decrypted.nonce);
+          // Keep only last 1000 nonces to prevent memory leak
+          if (seenNonces.current.size > 1000) {
+            const arr = Array.from(seenNonces.current);
+            seenNonces.current = new Set(arr.slice(-500));
+          }
+        }
+        
+        // Timestamp validation: reject messages older than 5 minutes
+        const msgTimestamp = decrypted.timestamp || timestamp;
+        if (Date.now() - msgTimestamp > 5 * 60 * 1000) {
+          console.warn("Message rejected: too old");
+          return;
+        }
+        
         // Validate message type before processing
         if (decrypted.type !== "text" && decrypted.type !== "file") {
           console.error("Invalid message type:", decrypted.type);
           return;
         }
+
+        // Handle chunked file transfer
+        if (decrypted.chunk) {
+          const { fileId, chunkIndex, totalChunks, fileName, fileType, fileSize, chunkData } = decrypted.chunk;
+          
+          // Initialize chunk tracker for this file if needed
+          if (!incomingChunks.current.has(fileId)) {
+            incomingChunks.current.set(fileId, {
+              chunks: new Map(),
+              meta: { totalChunks, fileName, fileType, fileSize }
+            });
+          }
+          
+          const fileTracker = incomingChunks.current.get(fileId)!;
+          
+          // Decode chunk data
+          const chunkBytes = new Uint8Array(base64ToArrayBuffer(chunkData));
+          fileTracker.chunks.set(chunkIndex, chunkBytes);
+          
+          // Check if all chunks received
+          if (fileTracker.chunks.size === totalChunks) {
+            // Reassemble file
+            const completeFile = new Uint8Array(fileSize);
+            let offset = 0;
+            for (let i = 0; i < totalChunks; i++) {
+              const chunk = fileTracker.chunks.get(i);
+              if (!chunk) {
+                console.error("Missing chunk:", i);
+                incomingChunks.current.delete(fileId);
+                return;
+              }
+              completeFile.set(chunk, offset);
+              offset += chunk.length;
+            }
+            
+            // Add to messages
+            setMessages(prev => [...prev, {
+              id: `${senderId}-${timestamp}-${fileId}`,
+              type: "file",
+              senderId,
+              timestamp,
+              fileName: sanitizeFileName(fileName),
+              fileType,
+              fileData: completeFile.buffer,
+              fileSize,
+            }]);
+            
+            // Clean up
+            incomingChunks.current.delete(fileId);
+          }
+          
+          return; // Don't process as regular message
+        }
+
         const newMessage: Message = { id: `${senderId}-${timestamp}`, type: decrypted.type, senderId, timestamp };
         if (decrypted.type === "text") {
           if (typeof decrypted.text !== "string") {
@@ -333,46 +446,97 @@ export default function App() {
     (file: File) => {
       if (!socket || !cryptoKey || !roomId || !workerRef.current) return;
       setIsSending(true);
+      setUploadProgress({ current: 0, total: file.size, fileName: file.name });
 
       const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
       const handler = (e: MessageEvent<WorkerResponse>) => {
         const data = e.data;
         if (data.id !== requestId) return;
-        workerRef.current?.removeEventListener("message", handler);
 
         if (data.type === "encrypt-file-error") {
           console.error("Failed to send file:", data.error);
           setErrorToast(`发送失败: ${data.error}`);
           setIsSending(false);
+          setUploadProgress(null);
+          workerRef.current?.removeEventListener("message", handler);
           return;
         }
 
-        // Send encrypted envelope via socket
-        socket.emit("send-message", { roomId, payload: data.envelope });
+        if (data.type === "encrypt-progress") {
+          setUploadProgress({
+            current: data.progress * file.size,
+            total: file.size,
+            fileName: file.name,
+          });
+          return;
+        }
 
-        // Add to local messages with the ArrayBuffer for display/download
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `me-${crypto.randomUUID()}`,
-            type: "file" as MessageType,
-            senderId: socket.id || "me",
-            timestamp: Date.now(),
-            fileName: data.fileName,
-            fileType: data.fileType,
-            fileData: data.fileData,
-            fileSize: data.fileData.byteLength,
-          },
-        ]);
+        // Handle small files (single envelope)
+        if (data.type === "encrypt-file-done") {
+          socket.emit("send-message", { roomId, payload: data.envelope });
 
-        setIsSending(false);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `me-${crypto.randomUUID()}`,
+              type: "file" as MessageType,
+              senderId: socket.id || "me",
+              timestamp: Date.now(),
+              fileName: data.fileName,
+              fileType: data.fileType,
+              fileData: data.fileData,
+              fileSize: data.fileData.byteLength,
+            },
+          ]);
+
+          setIsSending(false);
+          setUploadProgress(null);
+          workerRef.current?.removeEventListener("message", handler);
+          return;
+        }
+
+        // Handle large files (chunked transfer)
+        if (data.type === "encrypt-chunks-done") {
+          // Send all chunks with small delays between them
+          data.chunks.forEach(({ envelope }, index) => {
+            setTimeout(() => {
+              socket.emit("send-message", { roomId, payload: envelope });
+            }, index * 50); // 50ms between chunks
+          });
+
+          // Add placeholder message to show file was sent
+          // The actual file data isn't available since we sent chunks,
+          // but we keep the file reference for display
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `me-${crypto.randomUUID()}`,
+              type: "file" as MessageType,
+              senderId: socket.id || "me",
+              timestamp: Date.now(),
+              fileName: data.fileName,
+              fileType: data.fileType,
+              fileData: undefined, // Chunks don't retain original data
+              fileSize: data.fileSize,
+            },
+          ]);
+
+          setIsSending(false);
+          setUploadProgress(null);
+          workerRef.current?.removeEventListener("message", handler);
+        }
       };
 
       workerRef.current.addEventListener("message", handler);
 
       // Read file as ArrayBuffer and transfer it to the worker
       file.arrayBuffer().then((arrayBuffer) => {
+        setUploadProgress({
+          current: arrayBuffer.byteLength,
+          total: arrayBuffer.byteLength,
+          fileName: file.name,
+        });
         workerRef.current?.postMessage(
           {
             type: "encrypt-file",
@@ -391,15 +555,90 @@ export default function App() {
 
   const handleFileInput = useCallback(
     (e: { target: { files: FileList | null } }) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      if (file.size > MAX_FILE_SIZE) {
-        setErrorToast(`文件 "${file.name}" (${formatFileSize(file.size)}) 超过 ${formatFileSize(MAX_FILE_SIZE)} 上限`);
+      const files = Array.from(e.target.files || []);
+      if (files.length === 0) return;
+
+      // Check total size
+      const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+      if (totalSize > MAX_FILE_SIZE) {
+        setErrorToast(
+          `总文件大小 (${formatFileSize(totalSize)}) 超过 ${formatFileSize(MAX_FILE_SIZE)} 上限`
+        );
         if (fileInputRef.current) fileInputRef.current.value = "";
         return;
       }
-      sendFile(file);
+
+      // Warn about large files on mobile
+      const isMobile = window.innerWidth < 1024;
+      if (isMobile && totalSize > 50 * 1024 * 1024) {
+        console.warn(
+          `Large files (${formatFileSize(totalSize)}) on mobile may cause memory issues`
+        );
+      }
+
+      // Send files sequentially
+      files.forEach((file, index) => {
+        setTimeout(() => sendFile(file), index * 100); // Stagger sends by 100ms
+      });
+
       if (fileInputRef.current) fileInputRef.current.value = "";
+    },
+    [sendFile]
+  );
+
+  const handleFolderInput = useCallback(
+    async (e: { target: { files: FileList | null } }) => {
+      const files = Array.from(e.target.files || []);
+      if (files.length === 0) return;
+
+      setIsZipping(true);
+
+      try {
+        const zip = new JSZip();
+
+        // Add all files to zip with their relative paths
+        files.forEach((file) => {
+          // Extract relative path from webkitRelativePath
+          const relativePath = (file as any).webkitRelativePath as string || file.name;
+          zip.file(relativePath, file);
+        });
+
+        // Generate zip blob
+        const zipBlob = await zip.generateAsync({
+          type: "blob",
+          compression: "DEFLATE",
+          compressionOptions: { level: 6 }
+        }, (metadata) => {
+          // Update progress during zip creation
+          setUploadProgress({
+            current: metadata.percent,
+            total: 100,
+            fileName: `压缩中... ${Math.round(metadata.percent)}%`
+          });
+        });
+
+        // Check size
+        if (zipBlob.size > MAX_FILE_SIZE) {
+          setErrorToast(`文件夹压缩后 (${formatFileSize(zipBlob.size)}) 超过 ${formatFileSize(MAX_FILE_SIZE)} 上限`);
+          setIsZipping(false);
+          setUploadProgress(null);
+          return;
+        }
+
+        // Convert to File object and send
+        const folderName = files[0] ? ((files[0] as any).webkitRelativePath as string).split("/")[0] : "folder";
+        const zipFile = new File([zipBlob], `${folderName}.zip`, { type: "application/zip" });
+
+        setIsZipping(false);
+        setUploadProgress(null);
+        sendFile(zipFile);
+
+      } catch (error) {
+        console.error("Failed to zip folder:", error);
+        setErrorToast("文件夹压缩失败");
+        setIsZipping(false);
+        setUploadProgress(null);
+      }
     },
     [sendFile]
   );
@@ -442,6 +681,31 @@ export default function App() {
       localStorage.removeItem(storageKey);
     }
   }, [roomId]);
+
+  const submitPassword = useCallback(async () => {
+    const hash = window.location.hash.slice(1);
+    const roomKey = hash.split(":")[0];
+    if (!roomKey || !passwordInput.trim()) return;
+
+    try {
+      const key = await deriveKeyWithPassword(roomKey, passwordInput.trim());
+      setCryptoKey(key);
+      setNeedsPassword(false);
+      setPasswordInput("");
+    } catch (err) {
+      setErrorToast("密码错误或无法解密");
+    }
+  }, [passwordInput]);
+
+  const createPasswordRoom = useCallback(() => {
+    const password = prompt("设置房间密码：");
+    if (!password || !password.trim()) return;
+
+    const roomKey = generateRoomKey();
+    window.history.replaceState(null, "", `#${roomKey}:pw`);
+    window.location.reload();
+  }, []);
+
   const shareUrl = window.location.href;
   const recentMessages = useMemo(() => messages.slice(-3), [messages]);
 
@@ -463,11 +727,58 @@ export default function App() {
         </div>
       )}
 
-      {isSending && (
+      {needsPassword && (
+        <div className="fixed inset-0 z-50 bg-white dark:bg-zinc-950 flex items-center justify-center p-6">
+          <div className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-6 max-w-sm w-full">
+            <div className="flex items-center gap-2 mb-4">
+              <ShieldCheck className="w-6 h-6 text-amber-500" />
+              <h2 className="font-semibold">密码保护房间</h2>
+            </div>
+            <p className="text-sm text-zinc-500 mb-4">此房间设置了密码保护，请输入密码以加入。</p>
+            <div className="flex flex-col gap-3">
+              <input
+                type="password"
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") submitPassword(); }}
+                placeholder="输入房间密码"
+                className="w-full bg-white dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-700 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                autoFocus
+              />
+              <button onClick={submitPassword} className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-medium">
+                进入房间
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {(isSending || isZipping) && uploadProgress && (
+        <div className="fixed inset-0 z-50 bg-white/95 dark:bg-zinc-950/95 flex items-center justify-center">
+          <div className="text-center w-64">
+            <div className="w-10 h-10 border-[3px] border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+            <p className="text-zinc-600 dark:text-zinc-300 text-sm mb-2">{isZipping ? "压缩中..." : "加密发送中..."}</p>
+            <p className="text-xs text-zinc-500 mb-2 truncate">{uploadProgress.fileName}</p>
+            <div className="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-2">
+              <div
+                className="bg-emerald-500 h-2 rounded-full transition-all duration-200"
+                style={{
+                  width: `${Math.min((uploadProgress.current / uploadProgress.total) * 100, 100)}%`,
+                }}
+              />
+            </div>
+            <p className="text-xs text-zinc-400 mt-1">
+              {isZipping ? `${Math.round(uploadProgress.current)}%` : `${formatFileSize(uploadProgress.current)} / ${formatFileSize(uploadProgress.total)}`}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {isSending && !uploadProgress && (
         <div className="fixed inset-0 z-50 bg-white/95 dark:bg-zinc-950/95 flex items-center justify-center">
           <div className="text-center">
             <div className="w-10 h-10 border-[3px] border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-            <p className="text-zinc-600 dark:text-zinc-300 text-sm">加密发送中...</p>
+            <p className="text-zinc-600 dark:text-zinc-300 text-sm">准备中...</p>
           </div>
         </div>
       )}
@@ -476,7 +787,10 @@ export default function App() {
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => setShowQRModal(false)}>
           <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-5 max-w-xs w-full shadow-xl" onClick={e => e.stopPropagation()}>
             <div className="flex justify-between items-center mb-4">
-              <h3 className="font-semibold">连接其他设备</h3>
+              <div className="flex items-center gap-2">
+                <h3 className="font-semibold">连接其他设备</h3>
+                {hasPassword && <span className="text-[10px] bg-amber-100 dark:bg-amber-500/20 text-amber-600 dark:text-amber-400 px-2 py-0.5 rounded-full">已加密</span>}
+              </div>
               <button onClick={() => setShowQRModal(false)} className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-lg"><X className="w-5 h-5" /></button>
             </div>
             <div className="flex flex-col items-center">
@@ -528,11 +842,50 @@ export default function App() {
             </div>
           </div>
           <div className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4">
+            <button onClick={createPasswordRoom} className="w-full py-2.5 bg-amber-500 hover:bg-amber-400 text-white rounded-lg text-sm font-medium flex items-center justify-center gap-2">
+              <ShieldCheck className="w-4 h-4" />
+              创建密码房间
+            </button>
+            <p className="text-[10px] text-zinc-400 text-center mt-1">密码额外保护，需单独分享密码</p>
+          </div>
+          <div className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4">
             <div className="flex items-center justify-between">
-              <span className="text-sm text-zinc-700 dark:text-zinc-300">自动添加到剪贴板</span>
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-zinc-700 dark:text-zinc-300">自动添加到剪贴板</span>
+                <div className="relative group">
+                  <span className="text-xs text-zinc-400 cursor-help">⚠️</span>
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-zinc-800 text-white text-xs px-2 py-1 rounded whitespace-nowrap z-10">
+                    注意：其他应用可能读取剪贴板
+                  </div>
+                </div>
+              </div>
               <AutoCopyToggle enabled={autoCopyToClipboard} onToggle={() => setAutoCopyToClipboard(!autoCopyToClipboard)} />
             </div>
           </div>
+          {/* Active Rooms */}
+          {activeRooms.filter(r => r.roomId !== roomId).length > 0 && (
+            <div className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4">
+              <h3 className="text-xs font-medium text-zinc-500 mb-2 flex items-center gap-1">
+                <Users className="w-3 h-3" />
+                局域网活跃房间
+              </h3>
+              <div className="flex flex-col gap-1">
+                {activeRooms.filter(r => r.roomId !== roomId).map((room) => (
+                  <button
+                    key={room.roomId}
+                    onClick={() => {
+                      window.location.hash = room.roomId;
+                      window.location.reload();
+                    }}
+                    className="text-xs text-zinc-600 dark:text-zinc-400 flex items-center justify-between p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors"
+                  >
+                    <span className="truncate">{room.roomId.slice(0, 12)}...</span>
+                    <span className="text-zinc-400">{room.members} 人</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
         <div className="flex-1 flex flex-col bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl min-h-0">
           <div className="px-4 py-2.5 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between shrink-0">
@@ -548,10 +901,20 @@ export default function App() {
           </div>
           <div className="p-3 border-t border-zinc-200 dark:border-zinc-800 shrink-0">
             <div className="flex items-end gap-2">
-              <textarea ref={textareaRef} value={textInput} onChange={(e) => setTextInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendText(); }}} placeholder="输入消息..." className="flex-1 bg-white dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-700 rounded-lg p-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-emerald-500/50 min-h-[40px] max-h-24" rows={1} />
-              <input type="file" ref={fileInputRef} onChange={handleFileInput} className="hidden" />
-              <button onClick={() => fileInputRef.current?.click()} className="p-2.5 bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-300 dark:hover:bg-zinc-700 rounded-lg"><FileUp className="w-5 h-5" /></button>
-              <button onClick={() => handleSendText()} disabled={!textInput.trim()} className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg text-sm font-medium">发送</button>
+<textarea ref={textareaRef} value={textInput} onChange={(e) => setTextInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendText(); }}} placeholder="输入消息..." className="flex-1 bg-white dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-700 rounded-lg p-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-emerald-500/50 min-h-[40px] max-h-24" rows={1} />
+               <input type="file" ref={fileInputRef} onChange={handleFileInput} className="hidden" multiple />
+               <input
+                 type="file"
+                 ref={folderInputRef}
+                 onChange={handleFolderInput}
+                 className="hidden"
+                 /* @ts-expect-error webkitdirectory is not in types */
+                 webkitdirectory=""
+                 directory=""
+               />
+               <button onClick={() => fileInputRef.current?.click()} className="p-2.5 bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-300 dark:hover:bg-zinc-700 rounded-lg"><FileUp className="w-5 h-5" /></button>
+               <button onClick={() => folderInputRef.current?.click()} disabled={isZipping} className="p-2.5 bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-300 dark:hover:bg-zinc-700 rounded-lg disabled:opacity-50"><FolderUp className="w-5 h-5" /></button>
+               <button onClick={() => handleSendText()} disabled={!textInput.trim()} className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg text-sm font-medium">发送</button>
             </div>
           </div>
         </div>
@@ -581,12 +944,30 @@ export default function App() {
           )}
           <div className="flex-1 flex flex-col justify-center gap-2.5 py-3">
             <div className="flex items-center justify-between px-4 py-3 bg-zinc-100 dark:bg-zinc-800 rounded-xl">
-              <span className="text-sm text-zinc-700 dark:text-zinc-300">自动添加到剪贴板</span>
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-zinc-700 dark:text-zinc-300">自动添加到剪贴板</span>
+                <div className="relative group">
+                  <span className="text-xs text-zinc-400 cursor-help">⚠️</span>
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-zinc-800 text-white text-xs px-2 py-1 rounded whitespace-nowrap z-10">
+                    注意：其他应用可能读取剪贴板
+                  </div>
+                </div>
+              </div>
               <AutoCopyToggle enabled={autoCopyToClipboard} onToggle={() => setAutoCopyToClipboard(!autoCopyToClipboard)} />
             </div>
-            <button onClick={pasteAndSend} className="w-full py-4 bg-emerald-600 active:bg-emerald-700 text-white rounded-xl font-semibold flex items-center justify-center gap-2 shadow-sm"><ClipboardPaste className="w-5 h-5" />粘贴并发送</button>
-            <button onClick={() => fileInputRef.current?.click()} className="w-full py-3 bg-zinc-100 dark:bg-zinc-800 active:bg-zinc-200 dark:active:bg-zinc-700 rounded-xl font-medium flex items-center justify-center gap-2"><FileUp className="w-5 h-5" />选择文件</button>
-            <input type="file" ref={fileInputRef} onChange={handleFileInput} className="hidden" />
+<button onClick={pasteAndSend} className="w-full py-4 bg-emerald-600 active:bg-emerald-700 text-white rounded-xl font-semibold flex items-center justify-center gap-2 shadow-sm"><ClipboardPaste className="w-5 h-5" />粘贴并发送</button>
+             <button onClick={() => fileInputRef.current?.click()} className="w-full py-3 bg-zinc-100 dark:bg-zinc-800 active:bg-zinc-200 dark:active:bg-zinc-700 rounded-xl font-medium flex items-center justify-center gap-2"><FileUp className="w-5 h-5" />选择文件</button>
+             <button onClick={() => folderInputRef.current?.click()} disabled={isZipping} className="w-full py-3 bg-zinc-100 dark:bg-zinc-800 active:bg-zinc-200 dark:active:bg-zinc-700 rounded-xl font-medium flex items-center justify-center gap-2 disabled:opacity-50"><FolderUp className="w-5 h-5" />{isZipping ? "压缩中..." : "发送文件夹"}</button>
+             <input type="file" ref={fileInputRef} onChange={handleFileInput} className="hidden" multiple />
+             <input
+               type="file"
+               ref={folderInputRef}
+               onChange={handleFolderInput}
+               className="hidden"
+               /* @ts-expect-error webkitdirectory is not in types */
+               webkitdirectory=""
+               directory=""
+             />
           </div>
         </div>
         <div className={cn("shrink-0 px-3 pt-2 border-t border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950", keyboardOpen ? "pb-safe fixed bottom-0 left-0 right-0 z-50" : "pb-3")}>

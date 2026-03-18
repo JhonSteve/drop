@@ -60,7 +60,7 @@ async function startServer() {
   const io = new Server(server, {
     cors: {
       origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-        // Allow requests from localhost, same-origin, and LAN IPs
+        // Allow requests from localhost, LAN IPs, and the Cloudflare domain
         if (!origin ||
             origin.includes("localhost") ||
             origin.includes("127.0.0.1") ||
@@ -69,7 +69,8 @@ async function startServer() {
             origin.startsWith("http://10.") ||
             origin.startsWith("https://10.") ||
             origin.startsWith("http://172.16.") ||
-            origin.startsWith("https://172.16.")) {
+            origin.startsWith("https://172.16.") ||
+            origin === "https://drop.jhonsteve.com") {
           callback(null, true);
         } else {
           callback(new Error("Not allowed by CORS"));
@@ -77,6 +78,7 @@ async function startServer() {
       },
       methods: ["GET", "POST"],
     },
+    transports: ["websocket", "polling"], // Prefer websocket, fallback to polling for Cloudflare Tunnel
     maxHttpBufferSize: 500 * 1024 * 1024, // 500 MB max payload
     pingTimeout: 60000,     // Close connection after 60s without pong
     pingInterval: 25000,    // Ping every 25s
@@ -86,6 +88,19 @@ async function startServer() {
 
   // Track which rooms each socket is in for accurate peer count
   const socketRooms = new Map<string, Set<string>>();
+
+  // Track active rooms and their member counts for LAN discovery
+  const activeRooms = new Map<string, number>();
+
+  function broadcastRoomList() {
+    const rooms: Array<{ roomId: string; members: number }> = [];
+    activeRooms.forEach((count, roomId) => {
+      if (count > 0) {
+        rooms.push({ roomId, members: count });
+      }
+    });
+    io.emit("room-list-update", rooms);
+  }
 
   // Simple rate limiter: max messages per socket per second
   const messageRates = new Map<string, { count: number; resetAt: number }>();
@@ -119,15 +134,24 @@ async function startServer() {
     socket.on("join-room", (roomId: string) => {
       socket.join(roomId);
       socketRooms.get(socket.id)?.add(roomId);
+      activeRooms.set(roomId, (activeRooms.get(roomId) || 0) + 1);
       console.log(`Socket ${socket.id} joined room ${roomId}`);
       broadcastRoomCount(roomId);
+      broadcastRoomList();
     });
 
     socket.on("leave-room", (roomId: string) => {
       socket.leave(roomId);
       socketRooms.get(socket.id)?.delete(roomId);
+      const count = activeRooms.get(roomId) || 0;
+      if (count <= 1) {
+        activeRooms.delete(roomId);
+      } else {
+        activeRooms.set(roomId, count - 1);
+      }
       console.log(`Socket ${socket.id} left room ${roomId}`);
       broadcastRoomCount(roomId);
+      broadcastRoomList();
     });
 
     socket.on("send-message", (data: { roomId: string; payload: unknown }) => {
@@ -153,15 +177,21 @@ async function startServer() {
       console.log("Client disconnected:", socket.id);
       const rooms = socketRooms.get(socket.id);
       if (rooms) {
-        // Socket.io auto-removes from rooms on disconnect,
-        // but we need to broadcast updated counts
         for (const roomId of rooms) {
+          // Decrement active room count
+          const count = activeRooms.get(roomId) || 0;
+          if (count <= 1) {
+            activeRooms.delete(roomId);
+          } else {
+            activeRooms.set(roomId, count - 1);
+          }
           // Use setTimeout to let socket.io finish cleanup first
           setTimeout(() => broadcastRoomCount(roomId), 50);
         }
       }
       socketRooms.delete(socket.id);
       messageRates.delete(socket.id);
+      broadcastRoomList();
     });
   });
 
