@@ -32,7 +32,7 @@ async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     console.log("正在生成局域网 SSL 证书，请稍候...");
     const ca = await createCA({
-      organization: "OpenClaw Local CA",
+      organization: "Drop Local CA",
       countryCode: "CN",
       state: "Shanghai",
       locality: "Shanghai",
@@ -214,8 +214,8 @@ async function startServer() {
 
   server.listen(PORT, "0.0.0.0", () => {
     const protocol = isHttps ? "https" : "http";
-    console.log(`OpenClaw Drop server running on ${protocol}://localhost:${PORT}`);
-    console.log(`OpenClaw Drop server running on ${protocol}://${localIP}:${PORT}`);
+    console.log(`Drop server running on ${protocol}://localhost:${PORT}`);
+    console.log(`Drop server running on ${protocol}://${localIP}:${PORT}`);
   });
 }
 

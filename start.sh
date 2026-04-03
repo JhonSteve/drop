@@ -1,5 +1,5 @@
 #!/bin/bash
-# OpenClaw Drop 启动脚本
+# Drop 启动脚本
 # 用于 Cloudflare Tunnel 部署
 
 # 设置环境变量绕过代理（确保直连 Cloudflare）
@@ -22,9 +22,9 @@ TUNNEL_LOG="$LOG_DIR/tunnel.log"
 # 确保日志目录存在
 mkdir -p "$LOG_DIR"
 
-# 启动 OpenClaw Drop 服务
+# 启动 Drop 服务
 start_server() {
-    echo "正在启动 OpenClaw Drop 服务..."
+    echo "正在启动 Drop 服务..."
     cd "$PROJECT_DIR"
     
     # 设置生产环境
@@ -35,7 +35,7 @@ start_server() {
     nohup npx tsx server.ts > "$SERVER_LOG" 2>&1 &
     echo $! > "$PID_FILE"
     
-    echo "OpenClaw Drop 服务已启动 (PID: $(cat $PID_FILE))"
+    echo "Drop 服务已启动 (PID: $(cat $PID_FILE))"
     echo "日志文件: $SERVER_LOG"
 }
 
@@ -44,7 +44,7 @@ start_tunnel() {
     echo "正在启动 Cloudflare Tunnel..."
     
     # 使用 cloudflared 配置文件启动 tunnel
-    nohup cloudflared tunnel run openclaw-drop > "$TUNNEL_LOG" 2>&1 &
+    nohup cloudflared tunnel run drop > "$TUNNEL_LOG" 2>&1 &
     
     echo "Cloudflare Tunnel 已启动"
     echo "日志文件: $TUNNEL_LOG"
@@ -52,7 +52,7 @@ start_tunnel() {
 
 # 主流程
 echo "========================================="
-echo "OpenClaw Drop 服务启动"
+echo "Drop 服务启动"
 echo "时间: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "========================================="
 

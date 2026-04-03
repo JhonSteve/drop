@@ -8,12 +8,12 @@ NC='\033[0m'
 
 clear
 echo -e "${BLUE}═══════════════════════════════════════════${NC}"
-echo -e "${BLUE}   🛑 OpenClaw Drop - 停止服务${NC}"
+echo -e "${BLUE}   🛑 Drop - 停止服务${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════${NC}"
 echo ""
 
 # Stop server
-SERVER_PID=$(cat /tmp/openclaw-drop-server.pid 2>/dev/null)
+SERVER_PID=$(cat /tmp/drop-server.pid 2>/dev/null)
 if [ -n "$SERVER_PID" ] && ps -p "$SERVER_PID" >/dev/null 2>&1; then
   echo -e "${BLUE}▶ 停止服务器 (PID: $SERVER_PID)...${NC}"
   kill "$SERVER_PID" 2>/dev/null
@@ -25,7 +25,7 @@ if [ -n "$SERVER_PID" ] && ps -p "$SERVER_PID" >/dev/null 2>&1; then
 else
   echo -e "${YELLOW}⚠ 服务器未运行${NC}"
 fi
-rm -f /tmp/openclaw-drop-server.pid
+rm -f /tmp/drop-server.pid
 
 # Also kill anything on port 3001
 if lsof -Pi :3001 -sTCP:LISTEN -t >/dev/null 2>&1; then
@@ -37,7 +37,7 @@ fi
 echo ""
 
 # Stop cloudflared
-TUNNEL_PID=$(cat /tmp/openclaw-drop-tunnel.pid 2>/dev/null)
+TUNNEL_PID=$(cat /tmp/drop-tunnel.pid 2>/dev/null)
 if [ -n "$TUNNEL_PID" ] && ps -p "$TUNNEL_PID" >/dev/null 2>&1; then
   echo -e "${BLUE}▶ 停止 Cloudflare Tunnel (PID: $TUNNEL_PID)...${NC}"
   kill "$TUNNEL_PID" 2>/dev/null
@@ -48,7 +48,7 @@ fi
 
 # Also kill any cloudflared processes
 pkill -f cloudflared 2>/dev/null
-rm -f /tmp/openclaw-drop-tunnel.pid
+rm -f /tmp/drop-tunnel.pid
 
 echo ""
 echo -e "${BLUE}═══════════════════════════════════════════${NC}"

@@ -1,14 +1,14 @@
 #!/bin/bash
 
-# OpenClaw Drop Management Script
+# Drop Management Script
 # Provides start/stop/restart/status for server and Cloudflare Tunnel
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # PID files
-SERVER_PID_FILE="/tmp/openclaw-drop-server.pid"
-TUNNEL_PID_FILE="/tmp/openclaw-drop-tunnel.pid"
+SERVER_PID_FILE="/tmp/drop-server.pid"
+TUNNEL_PID_FILE="/tmp/drop-tunnel.pid"
 
 # Log directory and files
 LOG_DIR="$SCRIPT_DIR/logs"
@@ -194,7 +194,7 @@ start_server() {
         return 1
     fi
     
-    print_info "Starting OpenClaw Drop server..."
+    print_info "Starting Drop server..."
     
     # Set environment
     export NODE_ENV=production
@@ -236,7 +236,7 @@ start_tunnel() {
     export https_proxy=
     
     # Start tunnel in background
-    nohup cloudflared tunnel --config ~/.cloudflared/config.yml run openclaw-drop >> "$TUNNEL_LOG" 2>&1 &
+    nohup cloudflared tunnel --config ~/.cloudflared/config.yml run drop >> "$TUNNEL_LOG" 2>&1 &
     local new_pid=$!
     echo "$new_pid" > "$TUNNEL_PID_FILE"
     
@@ -246,7 +246,7 @@ start_tunnel() {
 }
 
 start_all() {
-    print_header "Starting OpenClaw Drop Services"
+    print_header "Starting Drop Services"
     
     local server_ok=0
     local tunnel_ok=0
@@ -300,7 +300,7 @@ stop_tunnel() {
 }
 
 stop_all() {
-    print_header "Stopping OpenClaw Drop Services"
+    print_header "Stopping Drop Services"
     
     stop_server
     stop_tunnel
@@ -314,7 +314,7 @@ stop_all() {
 # ============================================================
 
 restart_all() {
-    print_header "Restarting OpenClaw Drop Services"
+    print_header "Restarting Drop Services"
     
     stop_all
     sleep 2
@@ -326,7 +326,7 @@ restart_all() {
 # ============================================================
 
 show_status() {
-    print_header "OpenClaw Drop Status"
+    print_header "Drop Status"
     
     # Server status
     local server_pid=$(get_server_pid)
@@ -381,7 +381,7 @@ show_status() {
 # ============================================================
 
 show_usage() {
-    echo -e "${CYAN}OpenClaw Drop Management Script${NC}"
+    echo -e "${CYAN}Drop Management Script${NC}"
     echo ""
     echo -e "Usage: ${GREEN}./manage.sh${NC} ${YELLOW}<command>${NC}"
     echo ""
@@ -398,7 +398,7 @@ show_usage() {
     echo -e "  ${BLUE}./manage.sh stop${NC}      # Stop everything"
     echo ""
     echo -e "Files:"
-    echo -e "  PID files: ${YELLOW}/tmp/openclaw-drop-*.pid${NC}"
+    echo -e "  PID files: ${YELLOW}/tmp/drop-*.pid${NC}"
     echo -e "  Log files: ${YELLOW}$LOG_DIR/*.log${NC}"
     echo ""
 }

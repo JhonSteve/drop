@@ -281,7 +281,7 @@ export default function App() {
   // 从 localStorage 读取历史消息
   useEffect(() => {
     if (roomId) {
-      const storageKey = `openclaw-messages-${roomId}`;
+      const storageKey = `drop-messages-${roomId}`;
       const saved = localStorage.getItem(storageKey);
       if (saved) {
         try {
@@ -443,7 +443,7 @@ export default function App() {
   // 保存消息到 localStorage
   useEffect(() => {
     if (!roomId) return;
-    const storageKey = `openclaw-messages-${roomId}`;
+    const storageKey = `drop-messages-${roomId}`;
     // Don't save fileData to localStorage — it's too large and ephemeral
     // (crypto key changes each session, so persisted file data is unrecoverable)
     const toSave = messages.map(({ fileData: _fileData, ...rest }) => ({
@@ -749,7 +749,7 @@ export default function App() {
   const clearMessages = useCallback(() => {
     setMessages([]);
     if (roomId) {
-      const storageKey = `openclaw-messages-${roomId}`;
+      const storageKey = `drop-messages-${roomId}`;
       localStorage.removeItem(storageKey);
     }
   }, [roomId]);
@@ -902,7 +902,7 @@ export default function App() {
           <div className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4">
             <div className="flex items-center gap-2.5 mb-3">
               <div className="p-1.5 bg-emerald-100 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 rounded-lg"><ShieldCheck className="w-5 h-5" /></div>
-              <div><h1 className="font-semibold">OpenClaw Drop</h1><p className="text-xs text-zinc-500">端到端加密传输</p></div>
+              <div><h1 className="font-semibold">Drop</h1><p className="text-xs text-zinc-500">端到端加密传输</p></div>
             </div>
             <div className="flex flex-col items-center p-3 bg-white dark:bg-zinc-800 rounded-lg border border-zinc-200 dark:border-zinc-700"><QRCodeSVG value={shareUrl} size={140} level="H" includeMargin={false} /></div>
             <p className="text-xs text-zinc-500 text-center mt-2">扫描二维码连接</p>
@@ -995,7 +995,7 @@ export default function App() {
       {/* Mobile */}
       <div className="lg:hidden flex-1 flex flex-col min-h-0" style={{ paddingBottom: keyboardOpen ? 'env(keyboard-inset-height, 0px)' : 0 }}>
         <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-200 dark:border-zinc-800 shrink-0" style={{ display: keyboardOpen ? 'none' : 'flex' }}>
-          <div className="flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-emerald-500" /><span className="font-semibold text-sm">OpenClaw Drop</span></div>
+          <div className="flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-emerald-500" /><span className="font-semibold text-sm">Drop</span></div>
           <div className="flex items-center gap-2">
             <div className={cn("flex items-center gap-1 text-xs px-2 py-1 rounded-full", isConnected ? "bg-emerald-100 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400" : "bg-red-100 dark:bg-red-500/20 text-red-600 dark:text-red-400")}>{isConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}<span>{peersCount}</span></div>
             <button onClick={() => setShowQRModal(true)} className="p-1.5 bg-zinc-100 dark:bg-zinc-800 rounded-lg"><QrCode className="w-4 h-4" /></button>

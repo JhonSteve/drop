@@ -17,14 +17,14 @@ if lsof -Pi :3001 -sTCP:LISTEN -t >/dev/null 2>&1; then
   SERVER_RUNNING=true
 fi
 
-if pgrep -f "cloudflared.*openclaw-drop" >/dev/null 2>&1; then
+if pgrep -f "cloudflared.*drop" >/dev/null 2>&1; then
   TUNNEL_RUNNING=true
 fi
 
 if [ "$SERVER_RUNNING" = true ] || [ "$TUNNEL_RUNNING" = true ]; then
   # Running - show stop option
   echo -e "${BLUE}═══════════════════════════════════════════${NC}"
-  echo -e "${YELLOW}   OpenClaw Drop 正在运行${NC}"
+  echo -e "${YELLOW}   Drop 正在运行${NC}"
   echo -e "${BLUE}═══════════════════════════════════════════${NC}"
   echo ""
   echo -e "  访问: ${GREEN}https://drop.jhonsteve.com${NC}"
@@ -42,7 +42,7 @@ if [ "$SERVER_RUNNING" = true ] || [ "$TUNNEL_RUNNING" = true ]; then
       lsof -ti :3001 | xargs kill 2>/dev/null
       sleep 1
       lsof -ti :3001 | xargs kill -9 2>/dev/null
-      rm -f /tmp/openclaw-drop-*.pid
+      rm -f /tmp/drop-*.pid
       clear
       echo -e "${GREEN}✓ 所有服务已停止${NC}"
       ;;
@@ -52,7 +52,7 @@ if [ "$SERVER_RUNNING" = true ] || [ "$TUNNEL_RUNNING" = true ]; then
       lsof -ti :3001 | xargs kill 2>/dev/null
       sleep 1
       lsof -ti :3001 | xargs kill -9 2>/dev/null
-      rm -f /tmp/openclaw-drop-*.pid
+      rm -f /tmp/drop-*.pid
       sleep 1
       # Fall through to start
       ;;
@@ -69,13 +69,13 @@ fi
 if [ "$choice" != "1" ]; then
   clear
   echo -e "${BLUE}═══════════════════════════════════════════${NC}"
-  echo -e "${BLUE}   🚀 OpenClaw Drop - 启动服务${NC}"
+  echo -e "${BLUE}   🚀 Drop - 启动服务${NC}"
   echo -e "${BLUE}═══════════════════════════════════════════${NC}"
   echo ""
   
   echo -e "${BLUE}▶ 启动服务器...${NC}"
   nohup npx tsx server.ts > logs/server.log 2>&1 &
-  echo $! > /tmp/openclaw-drop-server.pid
+  echo $! > /tmp/drop-server.pid
   sleep 2
   
   if lsof -Pi :3001 -sTCP:LISTEN -t >/dev/null 2>&1; then
@@ -86,11 +86,11 @@ if [ "$choice" != "1" ]; then
   
   echo ""
   echo -e "${BLUE}▶ 启动 Cloudflare Tunnel...${NC}"
-  nohup cloudflared tunnel --config ~/.cloudflared/config.yml run openclaw-drop > logs/tunnel.log 2>&1 &
-  echo $! > /tmp/openclaw-drop-tunnel.pid
+  nohup cloudflared tunnel --config ~/.cloudflared/config.yml run drop > logs/tunnel.log 2>&1 &
+  echo $! > /tmp/drop-tunnel.pid
   sleep 3
   
-  if ps -p $(cat /tmp/openclaw-drop-tunnel.pid 2>/dev/null) >/dev/null 2>&1; then
+  if ps -p $(cat /tmp/drop-tunnel.pid 2>/dev/null) >/dev/null 2>&1; then
     echo -e "${GREEN}✓ Tunnel 启动成功${NC}"
   else
     echo -e "${RED}✗ Tunnel 启动失败${NC}"

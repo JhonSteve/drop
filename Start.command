@@ -9,7 +9,7 @@ NC='\033[0m'
 
 clear
 echo -e "${BLUE}═══════════════════════════════════════════${NC}"
-echo -e "${BLUE}   🚀 OpenClaw Drop - 启动服务${NC}"
+echo -e "${BLUE}   🚀 Drop - 启动服务${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════${NC}"
 echo ""
 
@@ -19,7 +19,7 @@ if lsof -Pi :3001 -sTCP:LISTEN -t >/dev/null 2>&1; then
 else
   echo -e "${BLUE}▶ 启动服务器...${NC}"
   nohup npx tsx server.ts > logs/server.log 2>&1 &
-  echo $! > /tmp/openclaw-drop-server.pid
+  echo $! > /tmp/drop-server.pid
   sleep 2
   
   if lsof -Pi :3001 -sTCP:LISTEN -t >/dev/null 2>&1; then
@@ -36,13 +36,13 @@ pkill -f cloudflared 2>/dev/null
 sleep 1
 
 echo -e "${BLUE}▶ 启动 Cloudflare Tunnel...${NC}"
-nohup cloudflared tunnel --config ~/.cloudflared/config.yml run openclaw-drop > logs/tunnel.log 2>&1 &
-echo $! > /tmp/openclaw-drop-tunnel.pid
+nohup cloudflared tunnel --config ~/.cloudflared/config.yml run drop > logs/tunnel.log 2>&1 &
+echo $! > /tmp/drop-tunnel.pid
 
 sleep 3
 
 # Check tunnel
-if ps -p $(cat /tmp/openclaw-drop-tunnel.pid 2>/dev/null) >/dev/null 2>&1; then
+if ps -p $(cat /tmp/drop-tunnel.pid 2>/dev/null) >/dev/null 2>&1; then
   echo -e "${GREEN}✓ Tunnel 启动成功${NC}"
 else
   echo -e "${RED}✗ Tunnel 启动失败，请检查 logs/tunnel.log${NC}"

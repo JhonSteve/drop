@@ -1,8 +1,8 @@
 <div align="center">
-<img width="1200" height="475" alt="OpenClaw Drop Banner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+<img width="1200" height="475" alt="Drop Banner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
 </div>
 
-# OpenClaw Drop 🚀
+# Drop 🚀
 
 端到端加密的跨设备文件传输工具
 
@@ -57,7 +57,7 @@ npm run dev
 
 ## 🔒 安全性
 
-OpenClaw Drop 采用严格的安全设计：
+Drop 采用严格的安全设计：
 
 - **URL Hash 存储密钥** - 加密密钥仅存储在客户端 URL #fragment 中，不会发送到服务器
 - **服务器无法解密** - 服务器仅转发加密数据，无法查看内容
@@ -108,7 +108,7 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 
 <div align="center">
 
-**Made with ❤️ by OpenClaw**
+**Made with ❤️ by Drop**
 
 [Report Bug](https://github.com/openclaw/drop/issues/new?template=bug_report.md) · [Request Feature](https://github.com/openclaw/drop/issues/new?template=feature_request.md)
 

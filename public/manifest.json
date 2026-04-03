@@ -1,6 +1,6 @@
 {
-  "name": "OpenClaw Drop",
-  "short_name": "OpenClaw",
+  "name": "Drop",
+  "short_name": "Drop",
   "description": "端到端加密的跨设备文件传输工具",
   "start_url": "/",
   "display": "standalone",
