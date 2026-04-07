@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 
 clear
@@ -13,19 +14,62 @@ echo -e "${BLUE}   🚀 Drop - 启动服务${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════${NC}"
 echo ""
 
+wait_for_server_3001() {
+  for _ in $(seq 1 20); do
+    server_pid=$(lsof -Pi :3001 -sTCP:LISTEN -t 2>/dev/null)
+    if [ -n "$server_pid" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+wait_for_tunnel_process() {
+  for _ in $(seq 1 15); do
+    tunnel_pid=$(cat /tmp/drop-tunnel.pid 2>/dev/null)
+    if [ -n "$tunnel_pid" ] && ps -p "$tunnel_pid" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+print_server_start_diagnostics() {
+  echo -e "${YELLOW}--- server.log 最后 40 行 ---${NC}"
+  if [ -f logs/server.log ]; then
+    tail -n 40 logs/server.log
+  else
+    echo "logs/server.log 不存在"
+  fi
+
+  echo -e "${YELLOW}--- tsx server.ts 进程检查 ---${NC}"
+  server_processes=$(ps aux | grep "tsx server.ts" | grep -v grep)
+  if [ -n "$server_processes" ]; then
+    printf '%s\n' "$server_processes"
+  else
+    echo "未发现 tsx server.ts 进程"
+  fi
+}
+
+mkdir -p logs
+
 # Check if server is already running
-if lsof -Pi :3001 -sTCP:LISTEN -t >/dev/null 2>&1; then
-  echo -e "${YELLOW}⚠  服务器已在运行 (端口 3001)${NC}"
+existing_server_pid=$(lsof -Pi :3001 -sTCP:LISTEN -t 2>/dev/null)
+if [ -n "$existing_server_pid" ]; then
+  echo -e "${YELLOW}⚠  服务器已在运行 (PID: $existing_server_pid)${NC}"
+  echo -e "${GREEN}✓ 服务器启动成功${NC}"
 else
   echo -e "${BLUE}▶ 启动服务器...${NC}"
-  nohup npx tsx server.ts > logs/server.log 2>&1 &
+  NODE_ENV=production nohup npx tsx server.ts > logs/server.log 2>&1 &
   echo $! > /tmp/drop-server.pid
-  sleep 2
-  
-  if lsof -Pi :3001 -sTCP:LISTEN -t >/dev/null 2>&1; then
+
+  if wait_for_server_3001; then
     echo -e "${GREEN}✓ 服务器启动成功${NC}"
   else
-    echo -e "${RED}✗ 服务器启动失败，请检查 logs/server.log${NC}"
+    echo -e "${RED}✗ 服务器启动失败（20秒超时）${NC}"
+    print_server_start_diagnostics
   fi
 fi
 
@@ -39,13 +83,11 @@ echo -e "${BLUE}▶ 启动 Cloudflare Tunnel...${NC}"
 nohup cloudflared tunnel --config ~/.cloudflared/config.yml run drop > logs/tunnel.log 2>&1 &
 echo $! > /tmp/drop-tunnel.pid
 
-sleep 3
-
-# Check tunnel
-if ps -p $(cat /tmp/drop-tunnel.pid 2>/dev/null) >/dev/null 2>&1; then
+if wait_for_tunnel_process; then
   echo -e "${GREEN}✓ Tunnel 启动成功${NC}"
 else
-  echo -e "${RED}✗ Tunnel 启动失败，请检查 logs/tunnel.log${NC}"
+  echo -e "${RED}✗ Tunnel 启动失败（15秒超时）${NC}"
+  echo -e "${YELLOW}请检查 logs/tunnel.log 获取更多信息${NC}"
 fi
 
 echo ""
