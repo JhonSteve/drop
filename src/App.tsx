@@ -36,9 +36,13 @@ interface Message {
 }
 
 interface ActiveRoomSummary {
-  roomId: string;
   members: number;
   roomCode: string | null;
+}
+
+interface PendingRoomCodeJoinRequest {
+  requestId: string;
+  requesterLabel: string;
 }
 
 /**
@@ -220,6 +224,9 @@ export default function App() {
   const [activeRooms, setActiveRooms] = useState<ActiveRoomSummary[]>([]);
   const [roomCode, setRoomCode] = useState<string>("");
   const [joinCodeInput, setJoinCodeInput] = useState("");
+  const [isJoinRequestPending, setIsJoinRequestPending] = useState(false);
+  const [pendingJoinRequestId, setPendingJoinRequestId] = useState<string | null>(null);
+  const [incomingJoinRequests, setIncomingJoinRequests] = useState<PendingRoomCodeJoinRequest[]>([]);
 
   useEffect(() => {
     if (!errorToast) return;
@@ -232,10 +239,25 @@ export default function App() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const workerRef = useRef<Worker | null>(null);
+  const pendingJoinRequestIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     autoCopyRef.current = autoCopyToClipboard;
   }, [autoCopyToClipboard]);
+
+  useEffect(() => {
+    pendingJoinRequestIdRef.current = pendingJoinRequestId;
+  }, [pendingJoinRequestId]);
+
+  const navigateToShareHash = useCallback((shareHash: string | null) => {
+    if (!shareHash) {
+      setErrorToast("房间暂时不可加入，请让对方重新打开分享链接");
+      return;
+    }
+
+    window.location.hash = shareHash;
+    window.location.reload();
+  }, []);
 
   // Initialize Web Worker for offloading file encryption
   useEffect(() => {
@@ -319,17 +341,19 @@ export default function App() {
   useEffect(() => {
     if (!roomId || !cryptoKey) return undefined;
     setRoomCode("");
+    setIsJoinRequestPending(false);
+    setPendingJoinRequestId(null);
+    setIncomingJoinRequests([]);
     const newSocket = io(window.location.origin, {
       transports: ["websocket", "polling"],
     });
     setSocket(newSocket);
     newSocket.on("connect", () => {
       setIsConnected(true);
-      newSocket.emit("join-room", roomId);
-      newSocket.emit("register-room-hash", {
-        roomId,
-        shareHash: window.location.hash.slice(1),
-      });
+       newSocket.emit("join-room", {
+         roomId,
+         shareHash: window.location.hash.slice(1),
+       });
     });
     newSocket.on("disconnect", () => {
       setIsConnected(false);
@@ -342,6 +366,72 @@ export default function App() {
     });
     newSocket.on("room-list-update", (rooms: ActiveRoomSummary[]) => {
       setActiveRooms(rooms);
+    });
+    newSocket.on("room-code-request-pending", (data: { requestId: string }) => {
+      if (typeof data?.requestId !== "string") {
+        return;
+      }
+
+      setPendingJoinRequestId(data.requestId);
+      setIsJoinRequestPending(true);
+      setErrorToast("已发送加入请求，等待对方确认");
+    });
+    newSocket.on("room-code-request-error", (data: { message: string }) => {
+      setIsJoinRequestPending(false);
+      setPendingJoinRequestId(null);
+      if (typeof data?.message === "string" && data.message) {
+        setErrorToast(data.message);
+      }
+    });
+    newSocket.on("room-code-join-request", (data: { requestId: string; requesterLabel?: string }) => {
+      if (typeof data?.requestId !== "string") {
+        return;
+      }
+
+      setIncomingJoinRequests((prev) => {
+        if (prev.some((request) => request.requestId === data.requestId)) {
+          return prev;
+        }
+
+        return [
+          ...prev,
+          {
+            requestId: data.requestId,
+            requesterLabel: data.requesterLabel?.trim() || "有设备",
+          },
+        ];
+      });
+    });
+    newSocket.on("room-code-approved", (data: { requestId: string; shareHash: string }) => {
+      if (pendingJoinRequestIdRef.current && data?.requestId !== pendingJoinRequestIdRef.current) {
+        return;
+      }
+
+      setIsJoinRequestPending(false);
+      setPendingJoinRequestId(null);
+      navigateToShareHash(data?.shareHash || null);
+    });
+    newSocket.on("room-code-rejected", (data: { requestId: string }) => {
+      if (pendingJoinRequestIdRef.current && data?.requestId !== pendingJoinRequestIdRef.current) {
+        return;
+      }
+
+      setIsJoinRequestPending(false);
+      setPendingJoinRequestId(null);
+      setErrorToast("对方已拒绝加入请求");
+    });
+    newSocket.on("room-code-request-expired", (data: { requestId: string }) => {
+      setIncomingJoinRequests((prev) => prev.filter((request) => request.requestId !== data?.requestId));
+      if (pendingJoinRequestIdRef.current && data?.requestId !== pendingJoinRequestIdRef.current) {
+        return;
+      }
+
+      setIsJoinRequestPending(false);
+      setPendingJoinRequestId(null);
+      setErrorToast("请求已过期");
+    });
+    newSocket.on("room-hash-conflict", () => {
+      setErrorToast("房间链接校验失败，请重新打开分享链接");
     });
     newSocket.on("receive-message", async (data: { senderId: string; payload: EncryptedEnvelope; timestamp: number }) => {
       try {
@@ -456,9 +546,16 @@ export default function App() {
     });
     return () => {
       newSocket.off("room-code");
+      newSocket.off("room-code-request-pending");
+      newSocket.off("room-code-request-error");
+      newSocket.off("room-code-join-request");
+      newSocket.off("room-code-approved");
+      newSocket.off("room-code-rejected");
+      newSocket.off("room-code-request-expired");
+      newSocket.off("room-hash-conflict");
       newSocket.disconnect();
     };
-  }, [roomId, cryptoKey]);
+  }, [cryptoKey, navigateToShareHash, roomId]);
 
   // 保存消息到 localStorage
   useEffect(() => {
@@ -798,16 +895,6 @@ export default function App() {
     window.location.reload();
   }, []);
 
-  const navigateToShareHash = useCallback((shareHash: string | null) => {
-    if (!shareHash) {
-      setErrorToast("房间暂时不可加入，请让对方重新打开分享链接");
-      return;
-    }
-
-    window.location.hash = shareHash;
-    window.location.reload();
-  }, []);
-
   const handleJoinByCode = useCallback(() => {
     if (!/^\d{4}$/.test(joinCodeInput)) {
       setErrorToast("请输入4位数字房间号");
@@ -819,25 +906,37 @@ export default function App() {
       return;
     }
 
-    socket.emit(
-      "lookup-room-by-code",
-      joinCodeInput,
-      (result: { roomId: string; shareHash: string | null } | null) => {
-        if (!result?.shareHash) {
-          setErrorToast("房间号不存在或已失效");
-          return;
-        }
+    if (isJoinRequestPending) {
+      setErrorToast("已有待确认的加入请求，请稍候");
+      return;
+    }
 
-        navigateToShareHash(result.shareHash);
-      },
-    );
-  }, [isConnected, joinCodeInput, navigateToShareHash, socket]);
+    socket.emit("request-join-by-code", { code: joinCodeInput });
+  }, [isConnected, isJoinRequestPending, joinCodeInput, socket]);
+
+  const handleApproveJoinRequest = useCallback((requestId: string) => {
+    if (!socket) {
+      return;
+    }
+
+    socket.emit("approve-room-code-request", { requestId });
+    setIncomingJoinRequests((prev) => prev.filter((request) => request.requestId !== requestId));
+  }, [socket]);
+
+  const handleRejectJoinRequest = useCallback((requestId: string) => {
+    if (!socket) {
+      return;
+    }
+
+    socket.emit("reject-room-code-request", { requestId });
+    setIncomingJoinRequests((prev) => prev.filter((request) => request.requestId !== requestId));
+  }, [socket]);
 
   const shareUrl = window.location.href;
   const recentMessages = useMemo(() => messages.slice(-3), [messages]);
   const activeOtherRooms = useMemo(
-    () => activeRooms.filter((activeRoom) => activeRoom.roomId !== roomId),
-    [activeRooms, roomId],
+    () => activeRooms.filter((activeRoom) => activeRoom.roomCode && activeRoom.roomCode !== roomCode),
+    [activeRooms, roomCode],
   );
   const roomCodeCard = roomCode ? (
     <div className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4">
@@ -878,13 +977,52 @@ export default function App() {
         />
         <button
           onClick={handleJoinByCode}
+          disabled={isJoinRequestPending}
           className="px-3 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium whitespace-nowrap"
         >
-          通过房间号加入
+          {isJoinRequestPending ? "等待确认中" : "通过房间号加入"}
         </button>
       </div>
+      {isJoinRequestPending && (
+        <div className="mt-3 rounded-lg border border-amber-200 dark:border-amber-500/20 bg-amber-50 dark:bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          已发送加入请求，等待房间内设备确认。
+        </div>
+      )}
     </div>
   );
+  const joinApprovalCard = incomingJoinRequests.length > 0 ? (
+    <div className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4">
+      <div className="mb-3">
+        <h3 className="text-sm font-semibold">加入确认</h3>
+        <p className="text-[11px] text-zinc-500">仅在你允许后，对方设备才会获得分享链接。</p>
+      </div>
+      <div className="space-y-2">
+        {incomingJoinRequests.map((request) => (
+          <div
+            key={request.requestId}
+            className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 px-3 py-3"
+          >
+            <p className="text-sm font-medium">{request.requesterLabel} 请求通过房间号加入</p>
+            <p className="text-[11px] text-zinc-500 mt-1">确认后将只向该设备发送当前房间的分享链接。</p>
+            <div className="flex items-center gap-2 mt-3">
+              <button
+                onClick={() => handleApproveJoinRequest(request.requestId)}
+                className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium"
+              >
+                允许
+              </button>
+              <button
+                onClick={() => handleRejectJoinRequest(request.requestId)}
+                className="px-3 py-2 bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-300 dark:hover:bg-zinc-700 rounded-lg text-sm font-medium"
+              >
+                拒绝
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  ) : null;
 
   if (!window.crypto || !window.crypto.subtle) {
     return (
@@ -1019,6 +1157,7 @@ export default function App() {
             <p className="text-xs text-zinc-500 text-center mt-2">扫描二维码连接</p>
           </div>
           {roomCodeCard}
+          {joinApprovalCard}
           {quickJoinCard}
           <div className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4">
             <div className="flex items-center justify-between">
@@ -1058,10 +1197,10 @@ export default function App() {
               <div className="flex flex-col gap-1">
                 {activeOtherRooms.map((room) => (
                   <div
-                    key={room.roomId}
+                    key={`${room.roomCode ?? "unknown"}-${room.members}`}
                     className="text-xs text-zinc-600 dark:text-zinc-400 flex items-center justify-between p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg"
                   >
-                    <span className="truncate">{room.roomCode ? `房间号 ${room.roomCode}` : `${room.roomId.slice(0, 12)}...`}</span>
+                    <span className="truncate">{room.roomCode ? `房间号 ${room.roomCode}` : "房间号暂不可用"}</span>
                     <span className="text-zinc-400">{room.members} 人</span>
                   </div>
                 ))}
@@ -1112,9 +1251,10 @@ export default function App() {
           </div>
         </div>
         <div className="flex-1 flex flex-col px-3 py-2 overflow-y-auto min-h-0" style={{ display: keyboardOpen ? 'none' : 'flex' }}>
-          {(roomCodeCard || quickJoinCard) && (
+          {(roomCodeCard || joinApprovalCard || quickJoinCard) && (
             <div className="mb-2 space-y-2 shrink-0">
               {roomCodeCard}
+              {joinApprovalCard}
               {quickJoinCard}
             </div>
           )}

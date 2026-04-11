@@ -96,6 +96,18 @@ async function startServer() {
   const roomCodes = new Map<string, string>();
   const codeToRoom = new Map<string, string>();
   const roomHashes = new Map<string, string>();
+  const pendingRoomCodeRequests = new Map<
+    string,
+    {
+      requesterSocketId: string;
+      roomId: string;
+      expiresAt: number;
+      timeout: ReturnType<typeof setTimeout>;
+    }
+  >();
+  const roomCodeJoinRates = new Map<string, { count: number; resetAt: number }>();
+  const ROOM_CODE_REQUEST_TTL_MS = 60_000;
+  const MAX_ROOM_CODE_REQUESTS_PER_MINUTE = 5;
 
   function allocateRoomCode(): string {
     if (codeToRoom.size >= 9000) {
@@ -143,6 +155,14 @@ async function startServer() {
       codeToRoom.delete(code);
     }
     roomHashes.delete(roomId);
+
+    for (const [requestId, request] of pendingRoomCodeRequests.entries()) {
+      if (request.roomId !== roomId) {
+        continue;
+      }
+
+      rejectPendingRoomCodeRequest(requestId, "expired");
+    }
   }
 
   function emitRoomCode(roomId: string) {
@@ -156,17 +176,64 @@ async function startServer() {
   }
 
   function broadcastRoomList() {
-    const rooms: Array<{ roomId: string; members: number; roomCode: string | null }> = [];
+    const rooms: Array<{ members: number; roomCode: string | null }> = [];
     activeRooms.forEach((count, roomId) => {
       if (count > 0) {
         rooms.push({
-          roomId,
           members: count,
           roomCode: roomCodes.get(roomId) || null,
         });
       }
     });
     io.emit("room-list-update", rooms);
+  }
+
+  function isRoomCodeJoinRateLimited(socketId: string): boolean {
+    const now = Date.now();
+    const rate = roomCodeJoinRates.get(socketId);
+    if (!rate || now > rate.resetAt) {
+      roomCodeJoinRates.set(socketId, { count: 1, resetAt: now + 60_000 });
+      return false;
+    }
+
+    rate.count += 1;
+    return rate.count > MAX_ROOM_CODE_REQUESTS_PER_MINUTE;
+  }
+
+  function rejectPendingRoomCodeRequest(requestId: string, reason: "rejected" | "expired") {
+    const request = pendingRoomCodeRequests.get(requestId);
+    if (!request) {
+      return;
+    }
+
+    clearTimeout(request.timeout);
+    pendingRoomCodeRequests.delete(requestId);
+    io.to(request.requesterSocketId).emit(
+      reason === "expired" ? "room-code-request-expired" : "room-code-rejected",
+      { requestId },
+    );
+  }
+
+  function registerRoomHash(roomId: string, shareHash: string, socketId: string): boolean {
+    const trimmedHash = shareHash.trim();
+    if (!trimmedHash || trimmedHash.length > 256) {
+      return false;
+    }
+
+    const existingHash = roomHashes.get(roomId);
+    if (!existingHash) {
+      roomHashes.set(roomId, trimmedHash);
+      return true;
+    }
+
+    if (existingHash === trimmedHash) {
+      return true;
+    }
+
+    console.warn(
+      `Socket ${socketId} attempted to supply conflicting hash for room ${roomId}`,
+    );
+    return false;
   }
 
   // Simple rate limiter: max messages per socket per second
@@ -198,7 +265,24 @@ async function startServer() {
     console.log("Client connected:", socket.id);
     socketRooms.set(socket.id, new Set());
 
-    socket.on("join-room", (roomId: string) => {
+    socket.on("join-room", (payload: { roomId: string; shareHash: string }) => {
+      if (!payload || typeof payload.roomId !== "string" || typeof payload.shareHash !== "string") {
+        socket.emit("room-hash-conflict");
+        return;
+      }
+
+      const roomId = payload.roomId.trim();
+      if (!roomId) {
+        socket.emit("room-hash-conflict");
+        return;
+      }
+
+      const didRegisterHash = registerRoomHash(roomId, payload.shareHash, socket.id);
+      if (!didRegisterHash) {
+        socket.emit("room-hash-conflict");
+        return;
+      }
+
       socket.join(roomId);
       socketRooms.get(socket.id)?.add(roomId);
       activeRooms.set(roomId, (activeRooms.get(roomId) || 0) + 1);
@@ -224,65 +308,121 @@ async function startServer() {
       broadcastRoomList();
     });
 
-    socket.on("register-room-hash", (data: { roomId: string; shareHash: string }) => {
-      if (!data || typeof data.roomId !== "string" || typeof data.shareHash !== "string") {
+    socket.on("request-join-by-code", (data: { code: string }) => {
+      if (!data || typeof data.code !== "string") {
+        socket.emit("room-code-request-error", { message: "请求无效，请重试" });
         return;
       }
 
-      const { roomId, shareHash } = data;
-      if (!socketRooms.get(socket.id)?.has(roomId)) {
-        console.warn(`Socket ${socket.id} attempted to register hash for room ${roomId} without joining`);
+      const code = data.code.trim();
+      if (!/^\d{4}$/.test(code)) {
+        socket.emit("room-code-request-error", { message: "请输入4位数字房间号" });
         return;
       }
 
-      const trimmedHash = shareHash.trim();
-      if (!trimmedHash || trimmedHash.length > 256) {
+      if (isRoomCodeJoinRateLimited(socket.id)) {
+        socket.emit("room-code-request-error", { message: "请求过于频繁，请稍后再试" });
         return;
       }
 
-      const existingHash = roomHashes.get(roomId);
-      if (!existingHash) {
-        roomHashes.set(roomId, trimmedHash);
-        emitRoomCode(roomId);
+      const roomId = codeToRoom.get(code);
+      if (!roomId) {
+        socket.emit("room-code-request-error", { message: "房间号不存在或已失效" });
         return;
       }
 
-      if (existingHash === trimmedHash) {
+      if (!activeRooms.has(roomId) || getRoomMemberCount(roomId) <= 0) {
+        socket.emit("room-code-request-error", { message: "房间暂时不可加入，请稍后再试" });
         return;
       }
 
-      console.warn(
-        `Socket ${socket.id} attempted to overwrite hash for room ${roomId}`,
-      );
+      const shareHash = roomHashes.get(roomId);
+      if (!shareHash) {
+        socket.emit("room-code-request-error", { message: "房间暂时不可加入，请让对方重新打开分享链接" });
+        return;
+      }
+
+      if (socketRooms.get(socket.id)?.has(roomId)) {
+        socket.emit("room-code-request-error", { message: "你已在该房间中" });
+        return;
+      }
+
+      const requestId = crypto.randomUUID();
+      const expiresAt = Date.now() + ROOM_CODE_REQUEST_TTL_MS;
+      const timeout = setTimeout(() => {
+        rejectPendingRoomCodeRequest(requestId, "expired");
+      }, ROOM_CODE_REQUEST_TTL_MS);
+
+      pendingRoomCodeRequests.set(requestId, {
+        requesterSocketId: socket.id,
+        roomId,
+        expiresAt,
+        timeout,
+      });
+
+      socket.emit("room-code-request-pending", {
+        requestId,
+        expiresInMs: ROOM_CODE_REQUEST_TTL_MS,
+      });
+
+      io.to(roomId).emit("room-code-join-request", {
+        requestId,
+        requesterLabel: `设备 ${socket.id.slice(0, 6)}`,
+        requestedAt: Date.now(),
+      });
     });
 
-    socket.on(
-      "lookup-room-by-code",
-      (
-        code: string,
-        callback?: (result: { roomId: string; shareHash: string | null } | null) => void,
-      ) => {
-        if (typeof callback !== "function") {
-          return;
-        }
+    socket.on("approve-room-code-request", (data: { requestId: string }) => {
+      if (!data || typeof data.requestId !== "string") {
+        return;
+      }
 
-        if (!/^\d{4}$/.test(code)) {
-          callback(null);
-          return;
-        }
+      const request = pendingRoomCodeRequests.get(data.requestId);
+      if (!request) {
+        return;
+      }
 
-        const roomId = codeToRoom.get(code);
-        if (!roomId || !activeRooms.has(roomId)) {
-          callback(null);
-          return;
-        }
+      if (request.expiresAt <= Date.now()) {
+        rejectPendingRoomCodeRequest(data.requestId, "expired");
+        return;
+      }
 
-        callback({
-          roomId,
-          shareHash: roomHashes.get(roomId) || null,
-        });
-      },
-    );
+      if (!socketRooms.get(socket.id)?.has(request.roomId)) {
+        console.warn(`Socket ${socket.id} attempted to approve request ${data.requestId} without room membership`);
+        return;
+      }
+
+      const shareHash = roomHashes.get(request.roomId);
+      if (!shareHash) {
+        rejectPendingRoomCodeRequest(data.requestId, "expired");
+        return;
+      }
+
+      clearTimeout(request.timeout);
+      pendingRoomCodeRequests.delete(data.requestId);
+      io.to(request.requesterSocketId).emit("room-code-approved", {
+        requestId: data.requestId,
+        shareHash,
+      });
+    });
+
+    socket.on("reject-room-code-request", (data: { requestId: string }) => {
+      if (!data || typeof data.requestId !== "string") {
+        return;
+      }
+
+      const request = pendingRoomCodeRequests.get(data.requestId);
+      if (!request) {
+        return;
+      }
+
+      if (!socketRooms.get(socket.id)?.has(request.roomId)) {
+        console.warn(`Socket ${socket.id} attempted to reject request ${data.requestId} without room membership`);
+        return;
+      }
+
+      rejectPendingRoomCodeRequest(data.requestId, "rejected");
+    });
 
     socket.on("send-message", (data: { roomId: string; payload: unknown }) => {
       // Rate limit check
@@ -323,6 +463,24 @@ async function startServer() {
       }
       socketRooms.delete(socket.id);
       messageRates.delete(socket.id);
+      roomCodeJoinRates.delete(socket.id);
+
+      for (const [requestId, request] of pendingRoomCodeRequests.entries()) {
+        const requesterDisconnected = request.requesterSocketId === socket.id;
+        const approverRoomBecameEmpty = !activeRooms.has(request.roomId);
+        if (!requesterDisconnected && !approverRoomBecameEmpty) {
+          continue;
+        }
+
+        if (requesterDisconnected) {
+          clearTimeout(request.timeout);
+          pendingRoomCodeRequests.delete(requestId);
+          continue;
+        }
+
+        rejectPendingRoomCodeRequest(requestId, "expired");
+      }
+
       broadcastRoomList();
     });
   });
