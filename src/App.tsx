@@ -35,6 +35,12 @@ interface Message {
   fileData?: ArrayBuffer;
 }
 
+interface ActiveRoomSummary {
+  roomId: string;
+  members: number;
+  roomCode: string | null;
+}
+
 /**
  * Sanitizes a file name to prevent path traversal attacks.
  * Inspired by LocalSend CVE-2025-27142 and Magic Wormhole CVE-2026-32116.
@@ -211,7 +217,9 @@ export default function App() {
   const [needsPassword, setNeedsPassword] = useState(false);
   const [passwordInput, setPasswordInput] = useState("");
   const [hasPassword, setHasPassword] = useState(false);
-  const [activeRooms, setActiveRooms] = useState<Array<{ roomId: string; members: number }>>([]);
+  const [activeRooms, setActiveRooms] = useState<ActiveRoomSummary[]>([]);
+  const [roomCode, setRoomCode] = useState<string>("");
+  const [joinCodeInput, setJoinCodeInput] = useState("");
 
   useEffect(() => {
     if (!errorToast) return;
@@ -310,6 +318,7 @@ export default function App() {
 
   useEffect(() => {
     if (!roomId || !cryptoKey) return undefined;
+    setRoomCode("");
     const newSocket = io(window.location.origin, {
       transports: ["websocket", "polling"],
     });
@@ -317,13 +326,21 @@ export default function App() {
     newSocket.on("connect", () => {
       setIsConnected(true);
       newSocket.emit("join-room", roomId);
+      newSocket.emit("register-room-hash", {
+        roomId,
+        shareHash: window.location.hash.slice(1),
+      });
     });
     newSocket.on("disconnect", () => {
       setIsConnected(false);
       setPeersCount(0);
+      setRoomCode("");
     });
     newSocket.on("room-count", (count: number) => setPeersCount(count));
-    newSocket.on("room-list-update", (rooms: Array<{ roomId: string; members: number }>) => {
+    newSocket.on("room-code", (code: string) => {
+      setRoomCode(code);
+    });
+    newSocket.on("room-list-update", (rooms: ActiveRoomSummary[]) => {
       setActiveRooms(rooms);
     });
     newSocket.on("receive-message", async (data: { senderId: string; payload: EncryptedEnvelope; timestamp: number }) => {
@@ -437,7 +454,10 @@ export default function App() {
         console.error("Failed to decrypt message", err);
       }
     });
-    return () => { newSocket.disconnect(); };
+    return () => {
+      newSocket.off("room-code");
+      newSocket.disconnect();
+    };
   }, [roomId, cryptoKey]);
 
   // 保存消息到 localStorage
@@ -778,8 +798,93 @@ export default function App() {
     window.location.reload();
   }, []);
 
+  const navigateToShareHash = useCallback((shareHash: string | null) => {
+    if (!shareHash) {
+      setErrorToast("房间暂时不可加入，请让对方重新打开分享链接");
+      return;
+    }
+
+    window.location.hash = shareHash;
+    window.location.reload();
+  }, []);
+
+  const handleJoinByCode = useCallback(() => {
+    if (!/^\d{4}$/.test(joinCodeInput)) {
+      setErrorToast("请输入4位数字房间号");
+      return;
+    }
+
+    if (!socket || !isConnected) {
+      setErrorToast("当前未连接到服务器，请稍后再试");
+      return;
+    }
+
+    socket.emit(
+      "lookup-room-by-code",
+      joinCodeInput,
+      (result: { roomId: string; shareHash: string | null } | null) => {
+        if (!result?.shareHash) {
+          setErrorToast("房间号不存在或已失效");
+          return;
+        }
+
+        navigateToShareHash(result.shareHash);
+      },
+    );
+  }, [isConnected, joinCodeInput, navigateToShareHash, socket]);
+
   const shareUrl = window.location.href;
   const recentMessages = useMemo(() => messages.slice(-3), [messages]);
+  const activeOtherRooms = useMemo(
+    () => activeRooms.filter((activeRoom) => activeRoom.roomId !== roomId),
+    [activeRooms, roomId],
+  );
+  const roomCodeCard = roomCode ? (
+    <div className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4">
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <h3 className="text-sm font-semibold">房间号</h3>
+          <p className="text-[11px] text-zinc-500">4 位数字，方便快速加入</p>
+        </div>
+        <button
+          onClick={() => copyToClipboard(roomCode, "room-code")}
+          className="p-2 bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-300 dark:hover:bg-zinc-700 rounded-lg shrink-0"
+        >
+          {copiedId === "room-code" ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+        </button>
+      </div>
+      <div className="rounded-xl border border-emerald-200 dark:border-emerald-500/20 bg-emerald-50 dark:bg-emerald-500/10 px-4 py-3 text-center">
+        <div className="text-3xl font-semibold tracking-[0.45em] text-emerald-700 dark:text-emerald-300 pl-[0.45em]">{roomCode}</div>
+      </div>
+    </div>
+  ) : null;
+  const quickJoinCard = (
+    <div className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4">
+      <div className="mb-3">
+        <h3 className="text-sm font-semibold">通过房间号加入</h3>
+        <p className="text-[11px] text-zinc-500">输入 4 位数字房间号快速进入</p>
+      </div>
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          maxLength={4}
+          value={joinCodeInput}
+          onChange={(e) => setJoinCodeInput(e.target.value.replace(/\D/g, "").slice(0, 4))}
+          onKeyDown={(e) => { if (e.key === "Enter") handleJoinByCode(); }}
+          placeholder="输入4位房间号"
+          className="flex-1 bg-white dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-700 rounded-lg px-3 py-2.5 text-sm tracking-[0.2em] focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+        />
+        <button
+          onClick={handleJoinByCode}
+          className="px-3 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium whitespace-nowrap"
+        >
+          通过房间号加入
+        </button>
+      </div>
+    </div>
+  );
 
   if (!window.crypto || !window.crypto.subtle) {
     return (
@@ -868,6 +973,12 @@ export default function App() {
             <div className="flex flex-col items-center">
               <div className="p-3 bg-white rounded-xl mb-3"><QRCodeSVG value={shareUrl} size={160} level="H" includeMargin={false} /></div>
               <p className="text-xs text-zinc-500 text-center mb-3">扫描二维码即可连接</p>
+              {roomCode && (
+                <div className="w-full rounded-xl border border-emerald-200 dark:border-emerald-500/20 bg-emerald-50 dark:bg-emerald-500/10 px-3 py-2 mb-3 text-center">
+                  <div className="text-[11px] text-zinc-500 mb-1">房间号</div>
+                  <div className="text-2xl font-semibold tracking-[0.4em] text-emerald-700 dark:text-emerald-300 pl-[0.4em]">{roomCode}</div>
+                </div>
+              )}
               <div className="flex items-center gap-2 w-full bg-zinc-100 dark:bg-zinc-800 rounded-lg p-2">
                 <input type="text" readOnly value={shareUrl} className="flex-1 bg-transparent text-xs text-zinc-500 outline-none truncate" />
                 <button onClick={() => copyToClipboard(shareUrl, "share-url")} className="p-1.5 bg-zinc-200 dark:bg-zinc-700 hover:bg-zinc-300 dark:hover:bg-zinc-600 rounded-md shrink-0">{copiedId === "share-url" ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}</button>
@@ -907,6 +1018,8 @@ export default function App() {
             <div className="flex flex-col items-center p-3 bg-white dark:bg-zinc-800 rounded-lg border border-zinc-200 dark:border-zinc-700"><QRCodeSVG value={shareUrl} size={140} level="H" includeMargin={false} /></div>
             <p className="text-xs text-zinc-500 text-center mt-2">扫描二维码连接</p>
           </div>
+          {roomCodeCard}
+          {quickJoinCard}
           <div className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">{isConnected ? <Wifi className="w-4 h-4 text-emerald-500" /> : <WifiOff className="w-4 h-4 text-red-500" />}<span className="text-sm">{isConnected ? "已连接" : "已断开"}</span></div>
@@ -935,25 +1048,22 @@ export default function App() {
             </div>
           </div>
           {/* Active Rooms */}
-          {activeRooms.filter(r => r.roomId !== roomId).length > 0 && (
+          {activeOtherRooms.length > 0 && (
             <div className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4">
               <h3 className="text-xs font-medium text-zinc-500 mb-2 flex items-center gap-1">
                 <Users className="w-3 h-3" />
                 局域网活跃房间
               </h3>
+              <p className="text-[11px] text-zinc-500 mb-2">仅显示安全元数据。如需加入，请使用上方 4 位房间号。</p>
               <div className="flex flex-col gap-1">
-                {activeRooms.filter(r => r.roomId !== roomId).map((room) => (
-                  <button
+                {activeOtherRooms.map((room) => (
+                  <div
                     key={room.roomId}
-                    onClick={() => {
-                      window.location.hash = room.roomId;
-                      window.location.reload();
-                    }}
-                    className="text-xs text-zinc-600 dark:text-zinc-400 flex items-center justify-between p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors"
+                    className="text-xs text-zinc-600 dark:text-zinc-400 flex items-center justify-between p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg"
                   >
-                    <span className="truncate">{room.roomId.slice(0, 12)}...</span>
+                    <span className="truncate">{room.roomCode ? `房间号 ${room.roomCode}` : `${room.roomId.slice(0, 12)}...`}</span>
                     <span className="text-zinc-400">{room.members} 人</span>
-                  </button>
+                  </div>
                 ))}
               </div>
             </div>
@@ -1002,6 +1112,12 @@ export default function App() {
           </div>
         </div>
         <div className="flex-1 flex flex-col px-3 py-2 overflow-y-auto min-h-0" style={{ display: keyboardOpen ? 'none' : 'flex' }}>
+          {(roomCodeCard || quickJoinCard) && (
+            <div className="mb-2 space-y-2 shrink-0">
+              {roomCodeCard}
+              {quickJoinCard}
+            </div>
+          )}
           {messages.length > 0 && (
             <div className="mb-2 shrink-0">
               <div className="flex items-center justify-between mb-1">

@@ -92,11 +92,78 @@ async function startServer() {
   // Track active rooms and their member counts for LAN discovery
   const activeRooms = new Map<string, number>();
 
+  // Track ephemeral room metadata for convenience joins
+  const roomCodes = new Map<string, string>();
+  const codeToRoom = new Map<string, string>();
+  const roomHashes = new Map<string, string>();
+
+  function allocateRoomCode(): string {
+    if (codeToRoom.size >= 9000) {
+      throw new Error("No room codes available");
+    }
+
+    for (let attempts = 0; attempts < 100; attempts += 1) {
+      const code = String(Math.floor(Math.random() * 9000) + 1000);
+      if (!codeToRoom.has(code)) {
+        return code;
+      }
+    }
+
+    for (let code = 1000; code <= 9999; code += 1) {
+      const nextCode = String(code);
+      if (!codeToRoom.has(nextCode)) {
+        return nextCode;
+      }
+    }
+
+    throw new Error("No room codes available");
+  }
+
+  function ensureRoomCode(roomId: string): string {
+    const existingCode = roomCodes.get(roomId);
+    if (existingCode) {
+      return existingCode;
+    }
+
+    const nextCode = allocateRoomCode();
+    roomCodes.set(roomId, nextCode);
+    codeToRoom.set(nextCode, roomId);
+    return nextCode;
+  }
+
+  function clearInactiveRoomMetadata(roomId: string) {
+    const activeCount = activeRooms.get(roomId) || 0;
+    if (activeCount > 0) {
+      return;
+    }
+
+    const code = roomCodes.get(roomId);
+    if (code) {
+      roomCodes.delete(roomId);
+      codeToRoom.delete(code);
+    }
+    roomHashes.delete(roomId);
+  }
+
+  function emitRoomCode(roomId: string) {
+    const activeCount = activeRooms.get(roomId) || 0;
+    if (activeCount <= 0) {
+      return;
+    }
+
+    const code = ensureRoomCode(roomId);
+    io.to(roomId).emit("room-code", code);
+  }
+
   function broadcastRoomList() {
-    const rooms: Array<{ roomId: string; members: number }> = [];
+    const rooms: Array<{ roomId: string; members: number; roomCode: string | null }> = [];
     activeRooms.forEach((count, roomId) => {
       if (count > 0) {
-        rooms.push({ roomId, members: count });
+        rooms.push({
+          roomId,
+          members: count,
+          roomCode: roomCodes.get(roomId) || null,
+        });
       }
     });
     io.emit("room-list-update", rooms);
@@ -135,6 +202,7 @@ async function startServer() {
       socket.join(roomId);
       socketRooms.get(socket.id)?.add(roomId);
       activeRooms.set(roomId, (activeRooms.get(roomId) || 0) + 1);
+      emitRoomCode(roomId);
       console.log(`Socket ${socket.id} joined room ${roomId}`);
       broadcastRoomCount(roomId);
       broadcastRoomList();
@@ -146,13 +214,75 @@ async function startServer() {
       const count = activeRooms.get(roomId) || 0;
       if (count <= 1) {
         activeRooms.delete(roomId);
+        clearInactiveRoomMetadata(roomId);
       } else {
         activeRooms.set(roomId, count - 1);
+        emitRoomCode(roomId);
       }
       console.log(`Socket ${socket.id} left room ${roomId}`);
       broadcastRoomCount(roomId);
       broadcastRoomList();
     });
+
+    socket.on("register-room-hash", (data: { roomId: string; shareHash: string }) => {
+      if (!data || typeof data.roomId !== "string" || typeof data.shareHash !== "string") {
+        return;
+      }
+
+      const { roomId, shareHash } = data;
+      if (!socketRooms.get(socket.id)?.has(roomId)) {
+        console.warn(`Socket ${socket.id} attempted to register hash for room ${roomId} without joining`);
+        return;
+      }
+
+      const trimmedHash = shareHash.trim();
+      if (!trimmedHash || trimmedHash.length > 256) {
+        return;
+      }
+
+      const existingHash = roomHashes.get(roomId);
+      if (!existingHash) {
+        roomHashes.set(roomId, trimmedHash);
+        emitRoomCode(roomId);
+        return;
+      }
+
+      if (existingHash === trimmedHash) {
+        return;
+      }
+
+      console.warn(
+        `Socket ${socket.id} attempted to overwrite hash for room ${roomId}`,
+      );
+    });
+
+    socket.on(
+      "lookup-room-by-code",
+      (
+        code: string,
+        callback?: (result: { roomId: string; shareHash: string | null } | null) => void,
+      ) => {
+        if (typeof callback !== "function") {
+          return;
+        }
+
+        if (!/^\d{4}$/.test(code)) {
+          callback(null);
+          return;
+        }
+
+        const roomId = codeToRoom.get(code);
+        if (!roomId || !activeRooms.has(roomId)) {
+          callback(null);
+          return;
+        }
+
+        callback({
+          roomId,
+          shareHash: roomHashes.get(roomId) || null,
+        });
+      },
+    );
 
     socket.on("send-message", (data: { roomId: string; payload: unknown }) => {
       // Rate limit check
@@ -182,8 +312,10 @@ async function startServer() {
           const count = activeRooms.get(roomId) || 0;
           if (count <= 1) {
             activeRooms.delete(roomId);
+            clearInactiveRoomMetadata(roomId);
           } else {
             activeRooms.set(roomId, count - 1);
+            emitRoomCode(roomId);
           }
           // Use setTimeout to let socket.io finish cleanup first
           setTimeout(() => broadcastRoomCount(roomId), 50);
