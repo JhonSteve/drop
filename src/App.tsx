@@ -37,7 +37,6 @@ interface Message {
 
 interface ActiveRoomSummary {
   members: number;
-  roomCode: string | null;
 }
 
 interface PendingRoomCodeJoinRequest {
@@ -934,10 +933,7 @@ export default function App() {
 
   const shareUrl = window.location.href;
   const recentMessages = useMemo(() => messages.slice(-3), [messages]);
-  const activeOtherRooms = useMemo(
-    () => activeRooms.filter((activeRoom) => activeRoom.roomCode && activeRoom.roomCode !== roomCode),
-    [activeRooms, roomCode],
-  );
+  const activeOtherRooms = useMemo(() => activeRooms.filter((activeRoom) => activeRoom.members > 0), [activeRooms]);
   const roomCodeCard = roomCode ? (
     <div className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4">
       <div className="flex items-center justify-between gap-3 mb-3">
@@ -1193,14 +1189,14 @@ export default function App() {
                 <Users className="w-3 h-3" />
                 局域网活跃房间
               </h3>
-              <p className="text-[11px] text-zinc-500 mb-2">仅显示安全元数据。如需加入，请使用上方 4 位房间号。</p>
+              <p className="text-[11px] text-zinc-500 mb-2">仅显示安全元数据。如需加入，请向房间成员获取 4 位房间号。</p>
               <div className="flex flex-col gap-1">
-                {activeOtherRooms.map((room) => (
+                {activeOtherRooms.map((room, index) => (
                   <div
-                    key={`${room.roomCode ?? "unknown"}-${room.members}`}
+                    key={`active-room-${index}-${room.members}`}
                     className="text-xs text-zinc-600 dark:text-zinc-400 flex items-center justify-between p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg"
                   >
-                    <span className="truncate">{room.roomCode ? `房间号 ${room.roomCode}` : "房间号暂不可用"}</span>
+                    <span className="truncate">活跃房间</span>
                     <span className="text-zinc-400">{room.members} 人</span>
                   </div>
                 ))}

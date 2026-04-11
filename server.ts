@@ -176,12 +176,11 @@ async function startServer() {
   }
 
   function broadcastRoomList() {
-    const rooms: Array<{ members: number; roomCode: string | null }> = [];
+    const rooms: Array<{ members: number }> = [];
     activeRooms.forEach((count, roomId) => {
       if (count > 0) {
         rooms.push({
           members: count,
-          roomCode: roomCodes.get(roomId) || null,
         });
       }
     });
