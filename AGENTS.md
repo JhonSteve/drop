@@ -1,7 +1,7 @@
 <claude-mem-context>
 # Memory Context
 
-# [openclaw-drop] recent context, 2026-04-23 9:18pm GMT+8
+# [drop] recent context, 2026-04-23 9:43pm GMT+8
 
 ## Local command convention
 
@@ -11,6 +11,8 @@ Shell commands in this workspace should follow the local RTK instruction at `/Us
 
 Drop is a React + TypeScript + Vite application with an Express + Socket.IO server. Its purpose is cross-device text, clipboard, file, and folder transfer for personal or small trusted-device use. The server maintains rooms and relays encrypted payloads; browsers perform encryption, decryption, file chunking, file assembly, and local message history.
 
+The local project directory is `/Users/jhonsteve/Downloads/drop`, and the GitHub repository is `JhonSteve/drop`.
+
 Key files:
 
 - `server.ts`: HTTP/HTTPS server, Socket.IO rooms, 4-digit room codes, join approval, rate limiting, encrypted message relay, Vite middleware in development, static file serving in production.
@@ -18,6 +20,7 @@ Key files:
 - `src/lib/crypto.ts`: Web Crypto helpers for PBKDF2-derived AES-GCM keys, encrypted envelopes, room key generation, and room id derivation.
 - `src/lib/file-worker.ts`: Web Worker for file encryption and 5MB chunk generation.
 - `docs/superpowers/specs/2026-04-23-drop-project-design.md`: current project understanding and development blueprint.
+- `docs/superpowers/specs/2026-04-23-project-rename-design.md`: design record for the project rename to `drop`.
 
 ## Important current judgment
 

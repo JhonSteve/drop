@@ -11,6 +11,7 @@ Drop 是一个面向个人和小范围可信设备的跨设备文本、剪贴板
 - 快速连接：通过分享链接、二维码和 4 位房间号降低跨设备加入成本。
 - 本地优先：浏览器端负责加密、解密、文件组装和历史展示，服务端只维持连接与转发。
 - 轻量部署：一个 Node 进程同时承载 Socket.IO 服务和前端产物，生产环境可通过 Cloudflare Tunnel 暴露公网访问。
+- 命名收敛：项目目录和 GitHub 仓库已统一为 `drop`；历史迁移记录保留在 rename spec 中。
 
 这个定位适合继续做成“私人即时传输工具”，不适合在当前架构上直接扩展成带账号、云盘、审计、团队权限的大型文件平台。
 
@@ -63,6 +64,7 @@ npm run lint
 - `manage.sh`、`start.sh`、`Start.command`、`Stop.command`、`Drop.command`：本机和公网部署管理脚本。
 - `.github`：issue 和 PR 模板。
 - `AGENTS.md`：仓库级 agent 上下文入口。当前内容是 Claude memory context，用于让后续自动化或协作 agent 读取项目会话背景，不参与应用运行时。
+- `docs/superpowers/specs/2026-04-23-project-rename-design.md`：记录项目命名迁移边界、GitHub 远端迁移和验证方式。
 
 最明显的结构问题是 `src/App.tsx` 已经超过 1300 行，并同时承载产品逻辑、协议逻辑、文件处理和视图布局。后续功能开发应逐步把它拆成更清晰的边界，而不是继续追加状态和事件处理。
 

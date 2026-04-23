@@ -11,7 +11,7 @@ export http_proxy=
 export https_proxy=
 
 # 项目目录
-PROJECT_DIR="/Users/jhonsteve/Downloads/openclaw-drop"
+PROJECT_DIR="/Users/jhonsteve/Downloads/drop"
 LOG_DIR="$PROJECT_DIR/logs"
 PID_FILE="$PROJECT_DIR/.server.pid"
 
