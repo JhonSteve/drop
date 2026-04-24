@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="32" viewBox="0 0 120 32" fill="none">
+  <g>
+    <path d="M4 9.5 16 3l12 6.5v13L16 29 4 22.5v-13Z" fill="#1E3A5F"></path>
+    <path d="M4 9.5 16 16l12-6.5" stroke="#FBF8F2" stroke-width="1.5" stroke-linejoin="round"></path>
+    <path d="M16 16v13" stroke="#FBF8F2" stroke-width="1.5" stroke-linejoin="round"></path>
+    <path d="M11.5 19.5 16 23.5 20.5 19.5" stroke="#FBF8F2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"></path>
+    <path d="M16 13v10.5" stroke="#FBF8F2" stroke-width="1.6" stroke-linecap="round"></path>
+  </g>
+  <text x="40" y="22" font-family="Inter, -apple-system, system-ui, sans-serif" font-size="20" font-weight="600" fill="#1C1917" letter-spacing="-0.3">Drop</text>
+</svg>
